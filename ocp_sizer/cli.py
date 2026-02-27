@@ -86,6 +86,16 @@ def build_parser() -> argparse.ArgumentParser:
             "'variants' — klasyczna tabela stałych wariantów (small/medium/large/...)"
         ),
     )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Maksymalna liczba workerów w tabeli VM sizing (domyślnie: min+7). "
+            "Przydatne gdy chcesz zobaczyć wariant 1:1 z aktualnym klastrem, np. --max-workers 25"
+        ),
+    )
     return parser
 
 
@@ -201,7 +211,7 @@ def main() -> None:
 
     sizing_mode = args.sizing_mode
     if sizing_mode == "vm":
-        worker_sizing_options = sizer.compute_optimal_worker_sizes()
+        worker_sizing_options = sizer.compute_optimal_worker_sizes(max_count=args.max_workers)
         sizing_variants = []
     else:
         sizing_variants = sizer.compute_all_variants()

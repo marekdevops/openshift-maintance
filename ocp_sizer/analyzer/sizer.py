@@ -266,12 +266,14 @@ class ClusterSizer:
         reasoning.append(f"Przy {n} workerach — {active} aktywnych (N+1 dla drain/upgrade)")
 
         # Ile allocatable potrzeba per node przy docelowym utilization
-        if active > 0 and self._effective_totals.cpu_millicores > 0:
-            cpu_alloc_needed = self._effective_totals.cpu_millicores / (active * self.target_utilization)
-            mem_alloc_needed = self._effective_totals.memory_bytes / (active * self.target_utilization)
-        else:
-            cpu_alloc_needed = 0.0
-            mem_alloc_needed = 0.0
+        # CPU i RAM obliczane niezależnie — namespace może mieć req CPU=0 ale duży RAM
+        cpu_alloc_needed = 0.0
+        mem_alloc_needed = 0.0
+        if active > 0:
+            if self._effective_totals.cpu_millicores > 0:
+                cpu_alloc_needed = self._effective_totals.cpu_millicores / (active * self.target_utilization)
+            if self._effective_totals.memory_bytes > 0:
+                mem_alloc_needed = self._effective_totals.memory_bytes / (active * self.target_utilization)
 
         # Dodaj system reserved i DaemonSet overhead → raw capacity per VM
         cpu_raw = cpu_alloc_needed + SYSTEM_RESERVED_CPU_MC + self.daemonset_overhead.cpu_millicores
