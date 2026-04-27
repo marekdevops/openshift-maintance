@@ -77,11 +77,27 @@ _section "1. Pod Disruption Budgets (PDB)"
 
 # Pobierz wszystkie pody w namespace z ich labelami
 # Dla każdego Deploymentu sprawdź czy jest PDB
-DEPLOYMENTS=$(oc get deployment -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
-DEPLOY_COUNT=$(echo "$DEPLOYMENTS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('items',[])))")
+DEPLOYMENTS=$(oc get deployment -n "$NAMESPACE" -o json 2>/dev/null || true)
+[[ -z "$DEPLOYMENTS" ]] && DEPLOYMENTS='{"items":[]}'
+DEPLOY_COUNT=$(echo "$DEPLOYMENTS" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(len(d.get('items', [])))
+except Exception:
+    print(0)
+")
 
-PDBS=$(oc get pdb -n "$NAMESPACE" -o json 2>/dev/null || echo '{"items":[]}')
-PDB_COUNT=$(echo "$PDBS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('items',[])))")
+PDBS=$(oc get pdb -n "$NAMESPACE" -o json 2>/dev/null || true)
+[[ -z "$PDBS" ]] && PDBS='{"items":[]}'
+PDB_COUNT=$(echo "$PDBS" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(len(d.get('items', [])))
+except Exception:
+    print(0)
+")
 
 _info "Deploymentów: ${DEPLOY_COUNT}, PDB: ${PDB_COUNT}"
 
@@ -89,7 +105,10 @@ _info "Deploymentów: ${DEPLOY_COUNT}, PDB: ${PDB_COUNT}"
 echo "$PDBS" | python3 - <<'PYEOF'
 import sys, json, os
 
-data = json.load(sys.stdin)
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError:
+    data = {'items': []}
 RED    = '\033[0;31m'
 YELLOW = '\033[1;33m'
 GREEN  = '\033[0;32m'
@@ -131,7 +150,10 @@ echo "$DEPLOYMENTS" | python3 - <<PYEOF2
 import sys, json
 
 ns_env = """${NAMESPACE}"""
-data = json.load(sys.stdin)
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError:
+    data = {'items': []}
 
 YELLOW = '\033[1;33m'
 RESET  = '\033[0m'
@@ -158,9 +180,12 @@ RESET  = '\033[0m'
 
 def oc_json(args):
     r = subprocess.run(['oc'] + args, capture_output=True, text=True)
-    if r.returncode != 0:
+    if r.returncode != 0 or not r.stdout.strip():
         return {'items': []}
-    return json.loads(r.stdout)
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return {'items': []}
 
 deployments = oc_json(['get', 'deployment', '-n', ns, '-o', 'json'])
 pdbs        = oc_json(['get', 'pdb',        '-n', ns, '-o', 'json'])
@@ -195,14 +220,20 @@ PYEOF3
 # ---------------------------------------------------------------------------
 _section "2. Local Storage (emptyDir / local PV)"
 
-PODS_JSON=$(oc get pods -n "$NAMESPACE" \
-    ${TARGET_NODE:+--field-selector="spec.nodeName=${TARGET_NODE}"} \
-    -o json 2>/dev/null || echo '{"items":[]}')
+if [[ -n "$TARGET_NODE" ]]; then
+    PODS_JSON=$(oc get pods -n "$NAMESPACE" --field-selector="spec.nodeName=${TARGET_NODE}" -o json 2>/dev/null || true)
+else
+    PODS_JSON=$(oc get pods -n "$NAMESPACE" -o json 2>/dev/null || true)
+fi
+[[ -z "$PODS_JSON" ]] && PODS_JSON='{"items":[]}'
 
 echo "$PODS_JSON" | python3 <<'PYEOF'
 import sys, json
 
-data = json.load(sys.stdin)
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError:
+    data = {'items': []}
 
 YELLOW = '\033[1;33m'
 RED    = '\033[0;31m'
@@ -251,9 +282,12 @@ RESET = '\033[0m'
 
 def oc_json(args):
     r = subprocess.run(['oc'] + args, capture_output=True, text=True)
-    if r.returncode != 0:
+    if r.returncode != 0 or not r.stdout.strip():
         return {'items': []}
-    return json.loads(r.stdout)
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return {'items': []}
 
 pvcs = oc_json(['get', 'pvc', '-n', ns, '-o', 'json'])
 pvs  = oc_json(['get', 'pv', '-o', 'json'])
@@ -292,7 +326,10 @@ _section "3. PodAntiAffinity (requiredDuringScheduling)"
 echo "$PODS_JSON" | python3 <<'PYEOF'
 import sys, json
 
-data = json.load(sys.stdin)
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError:
+    data = {'items': []}
 
 RED    = '\033[0;31m'
 YELLOW = '\033[1;33m'
@@ -349,9 +386,12 @@ RESET  = '\033[0m'
 
 def oc_json(args):
     r = subprocess.run(['oc'] + args, capture_output=True, text=True)
-    if r.returncode != 0:
+    if r.returncode != 0 or not r.stdout.strip():
         return {'items': []}
-    return json.loads(r.stdout)
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return {'items': []}
 
 deployments = oc_json(['get', 'deployment', '-n', ns, '-o', 'json'])
 pdbs        = oc_json(['get', 'pdb',        '-n', ns, '-o', 'json'])
@@ -409,9 +449,12 @@ RESET  = '\033[0m'
 
 def oc_json(args):
     r = subprocess.run(['oc'] + args, capture_output=True, text=True)
-    if r.returncode != 0:
+    if r.returncode != 0 or not r.stdout.strip():
         return {'items': []}
-    return json.loads(r.stdout)
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return {'items': []}
 
 pvcs   = oc_json(['get', 'pvc', '-n', ns, '-o', 'json'])
 pods   = oc_json(['get', 'pods', '-n', ns, '-o', 'json'])
@@ -506,7 +549,10 @@ GRACE_CRITICAL=600   # sekundy — powyżej tego progu sygnalizujemy błąd
 echo "$PODS_JSON" | python3 - <<PYEOF7
 import sys, json
 
-data = json.load(sys.stdin)
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError:
+    data = {'items': []}
 
 THRESHOLD = ${GRACE_THRESHOLD}
 CRITICAL  = ${GRACE_CRITICAL}
