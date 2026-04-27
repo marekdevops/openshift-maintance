@@ -433,9 +433,289 @@ if not single and not multi:
 PYEOF5
 
 # ---------------------------------------------------------------------------
-# 5. PVC ReadWriteOnce (RWO) — analiza stref i węzłów
+# 5. StatefulSets — repliki i pokrycie PDB
 # ---------------------------------------------------------------------------
-_section "5. PVC ReadWriteOnce (RWO) — strefy i węzły"
+_section "5. StatefulSets — repliki i pokrycie PDB"
+
+python3 <<PYEOF_STS
+import subprocess, json
+
+ns     = "${NAMESPACE}"
+RED    = '\033[0;31m'
+YELLOW = '\033[1;33m'
+GREEN  = '\033[0;32m'
+CYAN   = '\033[0;36m'
+RESET  = '\033[0m'
+
+def oc_json(args):
+    r = subprocess.run(['oc'] + args, capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        return {'items': []}
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return {'items': []}
+
+stss = oc_json(['get', 'statefulset', '-n', ns, '-o', 'json'])
+pdbs = oc_json(['get', 'pdb',         '-n', ns, '-o', 'json'])
+
+if not stss['items']:
+    print(f"  {GREEN}[OK]{RESET}  Brak StatefulSetów w namespace")
+
+def pdb_for(sts_labels):
+    for pdb in pdbs['items']:
+        sel = pdb.get('spec', {}).get('selector', {}).get('matchLabels', {})
+        if sel and all(sts_labels.get(k) == v for k, v in sel.items()):
+            return pdb
+    return None
+
+for sts in stss['items']:
+    name           = sts['metadata']['name']
+    replicas       = sts.get('spec', {}).get('replicas', 1)
+    ready          = sts.get('status', {}).get('readyReplicas', 0)
+    labels         = sts.get('spec', {}).get('selector', {}).get('matchLabels', {})
+    pod_mgmt       = sts.get('spec', {}).get('podManagementPolicy', 'OrderedReady')
+    update_strat   = sts.get('spec', {}).get('updateStrategy', {}).get('type', 'RollingUpdate')
+    pdb            = pdb_for(labels)
+    pdb_name       = pdb['metadata']['name'] if pdb else None
+
+    pdb_disruptions = pdb.get('status', {}).get('disruptionsAllowed', 0) if pdb else None
+    pdb_min_avail   = pdb.get('spec', {}).get('minAvailable') if pdb else None
+    pdb_max_unavail = pdb.get('spec', {}).get('maxUnavailable') if pdb else None
+
+    # Zidentyfikuj typ komponentu po labelach (Strimzi, inne operatory)
+    component_hint = ''
+    for k, v in labels.items():
+        if 'strimzi' in k:
+            role = labels.get('strimzi.io/component-type', labels.get('strimzi.io/kind', ''))
+            component_hint = f' [Strimzi:{role}]'
+            break
+
+    print(f"\n  {CYAN}StatefulSet '{name}'{component_hint}{RESET}"
+          f"  replicas={replicas} ready={ready}  podManagement={pod_mgmt}")
+
+    # Niegotowe repliki
+    if ready < replicas:
+        print(f"  {RED}[ERR]{RESET}  Nie wszystkie repliki gotowe ({ready}/{replicas})"
+              f" — drain na tym etapie zwiększa ryzyko utraty kworum")
+
+    # Pojedyncza replika
+    if replicas == 1:
+        if pdb_name:
+            print(f"  {YELLOW}[WARN]{RESET} replicas=1, PDB='{pdb_name}'"
+                  f" — drain spowoduje downtime; sprawdź czy minAvailable != 1")
+        else:
+            print(f"  {RED}[ERR]{RESET}  replicas=1, brak PDB"
+                  f" — drain PRZERWIE działanie serwisu (brak HA)")
+    else:
+        if pdb_name:
+            if pdb_disruptions == 0:
+                print(f"  {RED}[ERR]{RESET}  PDB='{pdb_name}': disruptionsAllowed=0"
+                      f" — drain ZABLOKOWANY do czasu powrotu wszystkich replik do Ready")
+            else:
+                print(f"  {GREEN}[OK]{RESET}  replicas={replicas}, PDB='{pdb_name}'"
+                      f" disruptionsAllowed={pdb_disruptions}")
+            # Wykryj maxUnavailable=0 w PDB
+            if pdb_max_unavail == 0 or pdb_max_unavail == '0':
+                print(f"  {RED}[ERR]{RESET}  PDB '{pdb_name}': maxUnavailable=0"
+                      f" — każda ewakuacja poda blokuje drain")
+            # Wykryj minAvailable >= replicas
+            if isinstance(pdb_min_avail, int) and pdb_min_avail >= replicas:
+                print(f"  {RED}[ERR]{RESET}  PDB '{pdb_name}': minAvailable={pdb_min_avail} >= replicas={replicas}"
+                      f" — drain niemożliwy bez naruszenia PDB")
+        else:
+            print(f"  {YELLOW}[WARN]{RESET} replicas={replicas}, brak PDB"
+                  f" — ewakuacja podów bez kontroli; możliwe przerwy w serwisie")
+
+    # OrderedReady + drain = wolniejsza relokacja
+    if pod_mgmt == 'OrderedReady':
+        print(f"  {CYAN}[INFO]{RESET} podManagementPolicy=OrderedReady"
+              f" — Kubernetes poczeka aż każdy pod będzie Ready przed ewakuacją kolejnego;"
+              f" drain może trwać znacznie dłużej")
+
+PYEOF_STS
+
+# ---------------------------------------------------------------------------
+# 6. Strimzi / Kafka — analiza specyficzna
+# ---------------------------------------------------------------------------
+_section "6. Strimzi / Kafka — analiza ryzyka drain"
+
+python3 <<PYEOF_KAFKA
+import subprocess, json, sys
+
+ns          = "${NAMESPACE}"
+node_filter = "${TARGET_NODE}"
+RED    = '\033[0;31m'
+YELLOW = '\033[1;33m'
+GREEN  = '\033[0;32m'
+CYAN   = '\033[0;36m'
+BOLD   = '\033[1m'
+RESET  = '\033[0m'
+
+def oc_json(args):
+    r = subprocess.run(['oc'] + args, capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        return {'items': []}
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return {'items': []}
+
+# Wykryj czy namespace zawiera Strimzi
+kafka_crs = oc_json(['get', 'kafka', '-n', ns, '-o', 'json'])
+if not kafka_crs['items']:
+    print(f"  {GREEN}[OK]{RESET}  Brak zasobów Strimzi Kafka w namespace — sekcja pominięta")
+    sys.exit(0)
+
+pods  = oc_json(['get', 'pods',  '-n', ns, '-o', 'json'])
+pdbs  = oc_json(['get', 'pdb',   '-n', ns, '-o', 'json'])
+stss  = oc_json(['get', 'statefulset', '-n', ns, '-o', 'json'])
+nodes = oc_json(['get', 'nodes', '-o', 'json'])
+
+node_map = {n['metadata']['name']: n for n in nodes.get('items', [])}
+
+# ── Dla każdego klastra Kafka ────────────────────────────────────────────────
+for kafka in kafka_crs['items']:
+    cluster = kafka['metadata']['name']
+    spec    = kafka.get('spec', {})
+    status  = kafka.get('status', {})
+
+    kafka_spec  = spec.get('kafka', {})
+    zk_spec     = spec.get('zookeeper', {})
+
+    kafka_replicas = kafka_spec.get('replicas', 0)
+    zk_replicas    = zk_spec.get('replicas', 0)
+
+    print(f"\n  {BOLD}{CYAN}Klaster Kafka: '{cluster}'{RESET}")
+    print(f"  {CYAN}[INFO]{RESET} Kafka brokerów: {kafka_replicas}   ZooKeeper: {zk_replicas}")
+
+    # ── Quorum ZooKeeper ────────────────────────────────────────────────────
+    if zk_replicas > 0:
+        if zk_replicas < 3:
+            print(f"  {RED}[ERR]{RESET}  ZooKeeper replicas={zk_replicas} < 3"
+                  f" — brak kworum HA; drain jednego węzła ZK może zatrzymać cały klaster Kafka")
+        elif zk_replicas % 2 == 0:
+            print(f"  {YELLOW}[WARN]{RESET} ZooKeeper replicas={zk_replicas} (parzysta liczba)"
+                  f" — ryzyko split-brain; zalecane 3 lub 5")
+        else:
+            tolerable = (zk_replicas - 1) // 2
+            print(f"  {GREEN}[OK]{RESET}  ZooKeeper replicas={zk_replicas}"
+                  f" — toleruje utratę {tolerable} węzła/węzłów bez utraty kworum")
+
+    # ── Liczba brokerów vs bezpieczeństwo drain ─────────────────────────────
+    if kafka_replicas < 3:
+        print(f"  {RED}[ERR]{RESET}  Kafka brokerów={kafka_replicas} < 3"
+              f" — drain jednego brokera może naruszyć replikację partycji")
+    else:
+        print(f"  {GREEN}[OK]{RESET}  Kafka brokerów={kafka_replicas}"
+              f" — drain jednego brokera bezpieczny jeśli replication.factor >= 3")
+
+    # ── min.insync.replicas z config Kafka ──────────────────────────────────
+    kafka_config = kafka_spec.get('config', {})
+    min_isr = kafka_config.get('min.insync.replicas')
+    default_rf = kafka_config.get('default.replication.factor')
+    offsets_rf = kafka_config.get('offsets.topic.replication.factor')
+
+    if min_isr is not None:
+        min_isr = int(min_isr)
+        if kafka_replicas - 1 < min_isr:
+            print(f"  {RED}[ERR]{RESET}  min.insync.replicas={min_isr}: po drain jednego brokera"
+                  f" pozostałoby {kafka_replicas-1} brokerów < min.insync.replicas"
+                  f" — PRODUCENCI ZACZNĄ DOSTAWAĆ NotEnoughReplicas")
+        else:
+            print(f"  {GREEN}[OK]{RESET}  min.insync.replicas={min_isr}"
+                  f" — po drain jednego brokera pozostaje {kafka_replicas-1} >= {min_isr}")
+    else:
+        print(f"  {YELLOW}[WARN]{RESET} min.insync.replicas: nie ustawione w spec.kafka.config"
+              f" — domyślnie 1 (niebezpieczne dla produkcji); zweryfikuj ręcznie")
+
+    if default_rf:
+        print(f"  {CYAN}[INFO]{RESET} default.replication.factor={default_rf}")
+    if offsets_rf:
+        print(f"  {CYAN}[INFO]{RESET} offsets.topic.replication.factor={offsets_rf}")
+
+    # ── PDB dla brokerów i ZooKeepera ───────────────────────────────────────
+    for role, label_val in [('kafka', 'kafka'), ('zookeeper', 'zookeeper')]:
+        matched_pdb = None
+        for pdb in pdbs['items']:
+            sel = pdb.get('spec', {}).get('selector', {}).get('matchLabels', {})
+            strimzi_name = sel.get('strimzi.io/cluster') or sel.get('strimzi.io/name', '')
+            strimzi_kind = sel.get('strimzi.io/component-type', sel.get('strimzi.io/kind', ''))
+            if (sel.get('strimzi.io/cluster') == cluster and
+                    label_val in strimzi_kind.lower()):
+                matched_pdb = pdb
+                break
+            # fallback: szukaj po nazwie poda
+            if f'{cluster}-{label_val}' in strimzi_name:
+                matched_pdb = pdb
+                break
+
+        if matched_pdb:
+            da  = matched_pdb.get('status', {}).get('disruptionsAllowed', 0)
+            exp = matched_pdb.get('status', {}).get('expectedPods', '?')
+            mxu = matched_pdb.get('spec', {}).get('maxUnavailable')
+            mna = matched_pdb.get('spec', {}).get('minAvailable')
+            pdb_n = matched_pdb['metadata']['name']
+            if da == 0:
+                print(f"  {RED}[ERR]{RESET}  PDB '{pdb_n}' ({role}): disruptionsAllowed=0"
+                      f" — drain ZABLOKOWANY; poczekaj aż wszystkie pody {role} będą Ready")
+            else:
+                print(f"  {GREEN}[OK]{RESET}  PDB '{pdb_n}' ({role}): disruptionsAllowed={da}"
+                      f" (expectedPods={exp})"
+                      + (f" maxUnavailable={mxu}" if mxu is not None else "")
+                      + (f" minAvailable={mna}" if mna is not None else ""))
+        else:
+            print(f"  {YELLOW}[WARN]{RESET} Brak PDB dla {role} klastra '{cluster}'"
+                  f" — Strimzi powinien tworzyć PDB automatycznie; sprawdź uprawnienia operatora")
+
+    # ── Pody brokerów i ZK na drenowanym węźle ──────────────────────────────
+    if node_filter:
+        print(f"\n  {CYAN}[INFO]{RESET} Pody Kafka/ZK na węźle '{node_filter}':")
+        found_on_node = False
+        for pod in pods.get('items', []):
+            pod_name  = pod['metadata']['name']
+            pod_node  = pod.get('spec', {}).get('nodeName', '')
+            pod_phase = pod.get('status', {}).get('phase', '')
+            pod_labels = pod.get('metadata', {}).get('labels', {})
+            if pod_node != node_filter:
+                continue
+            if pod_labels.get('strimzi.io/cluster') != cluster:
+                continue
+            role_label = pod_labels.get('strimzi.io/component-type',
+                         pod_labels.get('strimzi.io/kind', 'unknown'))
+            if 'kafka' in role_label.lower() or 'zookeeper' in role_label.lower():
+                print(f"    {RED}[ERR]{RESET}  Pod '{pod_name}' ({role_label}, {pod_phase})"
+                      f" JEST na drenowanym węźle — będzie ewakuowany")
+                found_on_node = True
+        if not found_on_node:
+            print(f"    {GREEN}[OK]{RESET}  Brak podów Kafka/ZK na węźle '{node_filter}'")
+
+# ── Kafka Connect / MirrorMaker / Bridge ────────────────────────────────────
+for kind, label in [('kafkaconnect', 'KafkaConnect'),
+                    ('kafkamirrormaker2', 'KafkaMirrorMaker2'),
+                    ('kafkabridge', 'KafkaBridge')]:
+    resources = oc_json(['get', kind, '-n', ns, '-o', 'json'])
+    for res in resources.get('items', []):
+        res_name = res['metadata']['name']
+        replicas = res.get('spec', {}).get('replicas', 1)
+        ready    = res.get('status', {}).get('readyReplicas', 0)
+        if replicas == 1:
+            print(f"  {YELLOW}[WARN]{RESET} {label} '{res_name}': replicas=1"
+                  f" — drain spowoduje przerwę w działaniu (brak HA)")
+        else:
+            status_str = f"ready={ready}/{replicas}"
+            if ready < replicas:
+                print(f"  {RED}[ERR]{RESET}  {label} '{res_name}': {status_str}"
+                      f" — nie wszystkie repliki gotowe przed drain")
+            else:
+                print(f"  {GREEN}[OK]{RESET}  {label} '{res_name}': {status_str}")
+
+PYEOF_KAFKA
+
+# ---------------------------------------------------------------------------
+# 7. PVC ReadWriteOnce (RWO) — analiza stref i węzłów
+# ---------------------------------------------------------------------------
+_section "7. PVC ReadWriteOnce (RWO) — strefy i węzły"
 
 python3 <<PYEOF6
 import subprocess, json
@@ -541,7 +821,7 @@ PYEOF6
 # ---------------------------------------------------------------------------
 # 6. terminationGracePeriodSeconds
 # ---------------------------------------------------------------------------
-_section "6. terminationGracePeriodSeconds"
+_section "8. terminationGracePeriodSeconds"
 
 GRACE_THRESHOLD=120  # sekundy — powyżej tego progu sygnalizujemy ostrzeżenie
 GRACE_CRITICAL=600   # sekundy — powyżej tego progu sygnalizujemy błąd
@@ -594,7 +874,7 @@ PYEOF7
 # ---------------------------------------------------------------------------
 # 7. Symulacja drain — co zostałoby wyparte (--dry-run)
 # ---------------------------------------------------------------------------
-_section "7. Symulacja drain (oc adm drain --dry-run)"
+_section "9. Symulacja drain (oc adm drain --dry-run)"
 
 if [[ -n "$TARGET_NODE" ]]; then
     _info "Uruchamianie: oc adm drain ${TARGET_NODE} --ignore-daemonsets --delete-emptydir-data --dry-run"
@@ -619,15 +899,31 @@ TOTAL=$((WARNINGS + ERRORS))
 if [[ $ERRORS -gt 0 ]]; then
     echo -e "  ${RED}${BOLD}WYNIK: KRYTYCZNE PROBLEMY — ${ERRORS} błąd(ów), ${WARNINGS} ostrzeżenie(ń)${RESET}"
     echo -e "  ${RED}Drain może spowodować outage lub zakończyć się błędem.${RESET}"
-    echo -e "  Zalecenia:"
-    echo -e "    1. Napraw konfigurację PDB (minAvailable, maxUnavailable)"
-    echo -e "    2. Usuń lub zmigruj dane z hostPath/local PV przed drain"
-    echo -e "    3. Zwiększ liczbę replik Deploymentów produkcyjnych ≥ 2"
+    echo ""
+    echo -e "  ${BOLD}Ogólne zalecenia:${RESET}"
+    echo -e "    • Napraw PDB: maxUnavailable >= 1 lub minAvailable < replicas"
+    echo -e "    • Upewnij się że wszystkie pody są w stanie Ready przed drain"
+    echo -e "    • Zwiększ liczbę replik do minimum 2 dla usług produkcyjnych"
+    echo -e "    • Usuń/zmigruj dane z hostPath i local PV zanim ruszysz węzeł"
+    echo ""
+    echo -e "  ${BOLD}Jeśli namespace zawiera Strimzi/Kafka:${RESET}"
+    echo -e "    • Sprawdź czy wszystkie brokery Kafka są w ISR (In-Sync Replicas)"
+    echo -e "      oc exec <kafka-pod> -- bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe | grep -v 'Isr:.*Leader'"
+    echo -e "    • Sprawdź under-replicated partitions PRZED drain:"
+    echo -e "      oc exec <kafka-pod> -- bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --under-replicated-partitions"
+    echo -e "    • Po drain brokera poczekaj na pełną resynchronizację ISR zanim dreenujesz kolejny węzeł"
+    echo -e "    • ZooKeeper: nigdy nie drenuj więcej niż (replicas-1)/2 węzłów jednocześnie"
 elif [[ $WARNINGS -gt 0 ]]; then
     echo -e "  ${YELLOW}${BOLD}WYNIK: OSTRZEŻENIA — ${WARNINGS} ostrzeżenie(ń)${RESET}"
     echo -e "  ${YELLOW}Drain jest możliwy, ale wymaga uwagi na powyższe punkty.${RESET}"
+    echo ""
+    echo -e "  ${BOLD}Przed drain zweryfikuj:${RESET}"
+    echo -e "    • Czy PDB dla każdego StatefulSet/Deployment ma disruptionsAllowed >= 1"
+    echo -e "    • Czy pody z RWO PVC mogą zostać zaplanowane na innym węźle w tej samej strefie"
+    echo -e "    • Czas terminacji podów (sekcja 8) — uwzględnij go w oknie maintenance"
 else
     echo -e "  ${GREEN}${BOLD}WYNIK: OK — Namespace gotowy na drain${RESET}"
+    echo -e "  ${GREEN}Nie wykryto krytycznych problemów. Możesz kontynuować.${RESET}"
 fi
 
 echo ""
