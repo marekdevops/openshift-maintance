@@ -101,79 +101,12 @@ except Exception:
 
 _info "Deploymentów: ${DEPLOY_COUNT}, PDB: ${PDB_COUNT}"
 
-# Dla każdego PDB sprawdź czy disruptionsAllowed > 0 i spójność selektora
-echo "$PDBS" | python3 - <<'PYEOF'
-import sys, json, os
-
-try:
-    data = json.load(sys.stdin)
-except json.JSONDecodeError:
-    data = {'items': []}
-RED    = '\033[0;31m'
-YELLOW = '\033[1;33m'
-GREEN  = '\033[0;32m'
-RESET  = '\033[0m'
-
-for pdb in data.get('items', []):
-    name   = pdb['metadata']['name']
-    spec   = pdb.get('spec', {})
-    status = pdb.get('status', {})
-
-    min_available      = spec.get('minAvailable')
-    max_unavailable    = spec.get('maxUnavailable')
-    disruptions_allowed = status.get('disruptionsAllowed', 0)
-    current_healthy    = status.get('currentHealthy', 0)
-    desired_healthy    = status.get('desiredHealthy', 0)
-    expected_pods      = status.get('expectedPods', 0)
-
-    # Wykryj blokujące PDB (disruptionsAllowed == 0)
-    if disruptions_allowed == 0:
-        print(f"  {RED}[ERR]{RESET}  PDB '{name}': disruptionsAllowed=0 — drain ZABLOKOWANY"
-              f" (currentHealthy={current_healthy}, desiredHealthy={desired_healthy})")
-    else:
-        print(f"  {GREEN}[OK]{RESET}  PDB '{name}': disruptionsAllowed={disruptions_allowed}"
-              f" (expectedPods={expected_pods})")
-
-    # Wykryj PDB z minAvailable == replicas (zablokuje drain przy jednej replice)
-    if isinstance(min_available, int) and min_available >= expected_pods > 0:
-        print(f"  {YELLOW}[WARN]{RESET} PDB '{name}': minAvailable={min_available} >= expectedPods={expected_pods}"
-              f" — niemożliwy drain bez naruszenia PDB")
-
-    # Wykryj błędny maxUnavailable: 0
-    if max_unavailable == 0 or max_unavailable == "0":
-        print(f"  {RED}[ERR]{RESET}  PDB '{name}': maxUnavailable=0 — drain ZABLOKOWANY")
-
-PYEOF
-
-# Sprawdź Deploymenty bez PDB
-echo "$DEPLOYMENTS" | python3 - <<PYEOF2
-import sys, json
-
-ns_env = """${NAMESPACE}"""
-try:
-    data = json.load(sys.stdin)
-except json.JSONDecodeError:
-    data = {'items': []}
-
-YELLOW = '\033[1;33m'
-RESET  = '\033[0m'
-
-for dep in data.get('items', []):
-    name = dep['metadata']['name']
-    replicas = dep.get('spec', {}).get('replicas', 1)
-    labels = dep.get('spec', {}).get('selector', {}).get('matchLabels', {})
-    # Wykryj brak PDB — sygnalizujemy, właściwa analiza selektorów wymaga korelacji z PDB
-    # Tutaj uproszczenie: jeśli deployment ma replicas>1 bez PDB to WARN
-    # (pełna korelacja selektor→PDB poniżej w sekcji 4)
-    pass  # rzeczywista detekcja w sekcji PDB vs Deploy poniżej
-
-PYEOF2
-
-# Korelacja: które Deploymenty nie mają pasującego PDB
-python3 <<PYEOF3
-import subprocess, json, sys
+# Jeden blok: status każdego PDB + korelacja Deployment→PDB
+python3 <<PYEOF_PDB1
+import subprocess, json
 
 ns = "${NAMESPACE}"
+RED    = '\033[0;31m'
 YELLOW = '\033[1;33m'
 GREEN  = '\033[0;32m'
 RESET  = '\033[0m'
@@ -190,84 +123,110 @@ def oc_json(args):
 deployments = oc_json(['get', 'deployment', '-n', ns, '-o', 'json'])
 pdbs        = oc_json(['get', 'pdb',        '-n', ns, '-o', 'json'])
 
-def labels_match(selector, pod_labels):
-    return all(pod_labels.get(k) == v for k, v in selector.items())
+def labels_match(selector, labels):
+    return all(labels.get(k) == v for k, v in selector.items())
 
+# ── Status każdego PDB ────────────────────────────────────────────────────────
+for pdb in pdbs['items']:
+    name             = pdb['metadata']['name']
+    spec             = pdb.get('spec', {})
+    status           = pdb.get('status', {})
+    min_available    = spec.get('minAvailable')
+    max_unavailable  = spec.get('maxUnavailable')
+    disruptions      = status.get('disruptionsAllowed', 0)
+    current_healthy  = status.get('currentHealthy', 0)
+    desired_healthy  = status.get('desiredHealthy', 0)
+    expected_pods    = status.get('expectedPods', 0)
+
+    if disruptions == 0:
+        print(f"  {RED}[ERR]{RESET}  PDB '{name}': disruptionsAllowed=0 — drain ZABLOKOWANY"
+              f" (currentHealthy={current_healthy}, desiredHealthy={desired_healthy})")
+    else:
+        print(f"  {GREEN}[OK]{RESET}  PDB '{name}': disruptionsAllowed={disruptions}"
+              f" (expectedPods={expected_pods})")
+
+    if isinstance(min_available, int) and min_available >= expected_pods > 0:
+        print(f"  {YELLOW}[WARN]{RESET} PDB '{name}': minAvailable={min_available} >= expectedPods={expected_pods}"
+              f" — niemożliwy drain bez naruszenia PDB")
+
+    if max_unavailable == 0 or max_unavailable == '0':
+        print(f"  {RED}[ERR]{RESET}  PDB '{name}': maxUnavailable=0 — drain ZABLOKOWANY")
+
+# ── Korelacja Deployment → PDB ────────────────────────────────────────────────
 for dep in deployments['items']:
     dep_name = dep['metadata']['name']
     dep_sel  = dep.get('spec', {}).get('selector', {}).get('matchLabels', {})
     replicas = dep.get('spec', {}).get('replicas', 1)
 
-    matched_pdb = None
+    matched = None
     for pdb in pdbs['items']:
         pdb_sel = pdb.get('spec', {}).get('selector', {}).get('matchLabels', {})
         if pdb_sel and labels_match(pdb_sel, dep_sel):
-            matched_pdb = pdb['metadata']['name']
+            matched = pdb['metadata']['name']
             break
 
-    if matched_pdb is None:
+    if matched is None:
         if replicas > 1:
             print(f"  {YELLOW}[WARN]{RESET} Deployment '{dep_name}' (replicas={replicas}): brak PDB — pody mogą zostać przerwane bez kontroli")
         else:
-            print(f"  {YELLOW}[WARN]{RESET} Deployment '{dep_name}' (replicas=1): brak PDB i pojedyncza replika — chwilowy downtime podczas drain")
+            print(f"  {YELLOW}[WARN]{RESET} Deployment '{dep_name}' (replicas=1): brak PDB — chwilowy downtime podczas drain")
     else:
-        print(f"  {GREEN}[OK]{RESET}  Deployment '{dep_name}' pokryty przez PDB '{matched_pdb}'")
+        print(f"  {GREEN}[OK]{RESET}  Deployment '{dep_name}' pokryty przez PDB '{matched}'")
 
-PYEOF3
+PYEOF_PDB1
 
 # ---------------------------------------------------------------------------
 # 2. Local Storage — emptyDir i Local PV
 # ---------------------------------------------------------------------------
 _section "2. Local Storage (emptyDir / local PV)"
 
-if [[ -n "$TARGET_NODE" ]]; then
-    PODS_JSON=$(oc get pods -n "$NAMESPACE" --field-selector="spec.nodeName=${TARGET_NODE}" -o json 2>/dev/null || true)
-else
-    PODS_JSON=$(oc get pods -n "$NAMESPACE" -o json 2>/dev/null || true)
-fi
-[[ -z "$PODS_JSON" ]] && PODS_JSON='{"items":[]}'
+python3 <<PYEOF_EMPTYDIR
+import subprocess, json
 
-echo "$PODS_JSON" | python3 <<'PYEOF'
-import sys, json
-
-try:
-    data = json.load(sys.stdin)
-except json.JSONDecodeError:
-    data = {'items': []}
-
+ns          = "${NAMESPACE}"
+node_filter = "${TARGET_NODE}"
 YELLOW = '\033[1;33m'
 RED    = '\033[0;31m'
 GREEN  = '\033[0;32m'
 RESET  = '\033[0m'
 
+def oc_json(args):
+    r = subprocess.run(['oc'] + args, capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        return {'items': []}
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return {'items': []}
+
+pod_args = ['get', 'pods', '-n', ns, '-o', 'json']
+if node_filter:
+    pod_args += [f'--field-selector=spec.nodeName={node_filter}']
+pods = oc_json(pod_args)
+
 found = False
-for pod in data.get('items', []):
+for pod in pods.get('items', []):
     pod_name = pod['metadata']['name']
     phase    = pod.get('status', {}).get('phase', '')
     if phase not in ('Running', 'Pending'):
         continue
 
-    volumes = pod.get('spec', {}).get('volumes', [])
-    for vol in volumes:
-        # emptyDir bez limitu rozmiaru
+    for vol in pod.get('spec', {}).get('volumes', []):
         if 'emptyDir' in vol:
-            ed = vol['emptyDir']
-            size_limit = ed.get('sizeLimit')
+            size_limit = vol['emptyDir'].get('sizeLimit')
             if not size_limit:
-                print(f"  {YELLOW}[WARN]{RESET} Pod '{pod_name}': emptyDir '{vol['name']}' bez sizeLimit — dane utracone po drain, może zajmować nieograniczone miejsce na hoście")
+                print(f"  {YELLOW}[WARN]{RESET} Pod '{pod_name}': emptyDir '{vol['name']}' bez sizeLimit — dane utracone po drain")
             else:
-                print(f"  {GREEN}[OK]{RESET}  Pod '{pod_name}': emptyDir '{vol['name']}' z sizeLimit={size_limit}")
+                print(f"  {GREEN}[OK]{RESET}  Pod '{pod_name}': emptyDir '{vol['name']}' sizeLimit={size_limit}")
             found = True
-
-        # hostPath — dane powiązane z konkretnym węzłem
         if 'hostPath' in vol:
-            hp = vol['hostPath']
-            print(f"  {RED}[ERR]{RESET}  Pod '{pod_name}': hostPath '{vol['name']}' → {hp.get('path','?')} — dane TYLKO na tym węźle, drain przerwie dostęp")
+            path = vol['hostPath'].get('path', '?')
+            print(f"  {RED}[ERR]{RESET}  Pod '{pod_name}': hostPath '{vol['name']}' → {path} — dane TYLKO na tym węźle, drain przerwie dostęp")
             found = True
 
 if not found:
-    print(f"  \033[0;32m[OK]\033[0m  Brak woluminów emptyDir/hostPath w działających podach")
-PYEOF
+    print(f"  {GREEN}[OK]{RESET}  Brak woluminów emptyDir/hostPath w działających podach")
+PYEOF_EMPTYDIR
 
 # Local PV — PV z storageClassName "local-*" lub volumeMode Block powiązane z namespace
 _info "Sprawdzam Local PersistentVolumes..."
@@ -323,52 +282,60 @@ PYEOF4
 # ---------------------------------------------------------------------------
 _section "3. PodAntiAffinity (requiredDuringScheduling)"
 
-echo "$PODS_JSON" | python3 <<'PYEOF'
-import sys, json
+python3 <<PYEOF_ANTIAFFINITY
+import subprocess, json
 
-try:
-    data = json.load(sys.stdin)
-except json.JSONDecodeError:
-    data = {'items': []}
-
+ns          = "${NAMESPACE}"
+node_filter = "${TARGET_NODE}"
 RED    = '\033[0;31m'
 YELLOW = '\033[1;33m'
 GREEN  = '\033[0;32m'
 RESET  = '\033[0m'
 
+def oc_json(args):
+    r = subprocess.run(['oc'] + args, capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        return {'items': []}
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return {'items': []}
+
+pod_args = ['get', 'pods', '-n', ns, '-o', 'json']
+if node_filter:
+    pod_args += [f'--field-selector=spec.nodeName={node_filter}']
+pods = oc_json(pod_args)
+
 found = False
-for pod in data.get('items', []):
+for pod in pods.get('items', []):
     pod_name = pod['metadata']['name']
-    phase    = pod.get('status', {}).get('phase', '')
-    if phase not in ('Running', 'Pending'):
+    if pod.get('status', {}).get('phase', '') not in ('Running', 'Pending'):
         continue
 
-    affinity = pod.get('spec', {}).get('affinity', {})
-    anti     = affinity.get('podAntiAffinity', {})
-    required = anti.get('requiredDuringSchedulingIgnoredDuringExecution', [])
+    required = (pod.get('spec', {})
+                   .get('affinity', {})
+                   .get('podAntiAffinity', {})
+                   .get('requiredDuringSchedulingIgnoredDuringExecution', []))
 
     for rule in required:
-        topology = rule.get('topologyKey', '')
-        selector = rule.get('labelSelector', {})
-        sel_labels = selector.get('matchLabels', {})
-        sel_exprs  = selector.get('matchExpressions', [])
+        topology   = rule.get('topologyKey', '')
+        sel_labels = rule.get('labelSelector', {}).get('matchLabels', {})
+        sel_exprs  = rule.get('labelSelector', {}).get('matchExpressions', [])
 
-        # Reguła per-node (kubernetes.io/hostname) = max 1 pod na węzeł
         if topology == 'kubernetes.io/hostname':
             print(f"  {RED}[ERR]{RESET}  Pod '{pod_name}': requiredAntiAffinity topologyKey=hostname"
-                  f" (selector={sel_labels or sel_exprs}) — jeśli klaster ma za mało węzłów,"
-                  f" pod NIE może być przeniesiony przed usunięciem oryginału")
+                  f" (selector={sel_labels or sel_exprs}) — jeśli za mało węzłów, pod NIE może być przeniesiony przed usunięciem oryginału")
         elif topology in ('topology.kubernetes.io/zone', 'topology.kubernetes.io/region'):
             print(f"  {YELLOW}[WARN]{RESET} Pod '{pod_name}': requiredAntiAffinity topologyKey={topology}"
-                  f" — ogranicza rozmieszczenie do różnych stref; drain może się nie powieść w strefie z tylko jednym węzłem")
+                  f" — drain może się nie powieść jeśli strefa ma tylko jeden węzeł")
         else:
             print(f"  {YELLOW}[WARN]{RESET} Pod '{pod_name}': requiredAntiAffinity topologyKey={topology}"
                   f" — niestandardowa topologia; zweryfikuj dostępność węzłów")
         found = True
 
 if not found:
-    print(f"  \033[0;32m[OK]\033[0m  Brak reguł requiredDuringScheduling PodAntiAffinity")
-PYEOF
+    print(f"  {GREEN}[OK]{RESET}  Brak reguł requiredDuringScheduling PodAntiAffinity")
+PYEOF_ANTIAFFINITY
 
 # ---------------------------------------------------------------------------
 # 4. Deploymenty z replicas: 1
@@ -823,39 +790,45 @@ PYEOF6
 # ---------------------------------------------------------------------------
 _section "8. terminationGracePeriodSeconds"
 
-GRACE_THRESHOLD=120  # sekundy — powyżej tego progu sygnalizujemy ostrzeżenie
-GRACE_CRITICAL=600   # sekundy — powyżej tego progu sygnalizujemy błąd
+python3 <<PYEOF_GRACE
+import subprocess, json
 
-echo "$PODS_JSON" | python3 - <<PYEOF7
-import sys, json
-
-try:
-    data = json.load(sys.stdin)
-except json.JSONDecodeError:
-    data = {'items': []}
-
-THRESHOLD = ${GRACE_THRESHOLD}
-CRITICAL  = ${GRACE_CRITICAL}
-
+ns          = "${TARGET_NODE}"
+node_filter = "${TARGET_NODE}"
+THRESHOLD   = 120
+CRITICAL    = 600
 RED    = '\033[0;31m'
 YELLOW = '\033[1;33m'
 GREEN  = '\033[0;32m'
 RESET  = '\033[0m'
 
+def oc_json(args):
+    r = subprocess.run(['oc'] + args, capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        return {'items': []}
+    try:
+        return json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return {'items': []}
+
+pod_args = ['get', 'pods', '-n', "${NAMESPACE}", '-o', 'json']
+if node_filter:
+    pod_args += [f'--field-selector=spec.nodeName={node_filter}']
+pods = oc_json(pod_args)
+
 long_grace = []
 ok_pods    = 0
 
-for pod in data.get('items', []):
+for pod in pods.get('items', []):
     pod_name = pod['metadata']['name']
-    phase    = pod.get('status', {}).get('phase', '')
-    if phase not in ('Running', 'Pending'):
+    if pod.get('status', {}).get('phase', '') not in ('Running', 'Pending'):
         continue
 
-    grace = pod.get('spec', {}).get('terminationGracePeriodSeconds', 30)  # domyślnie 30s
+    grace = pod.get('spec', {}).get('terminationGracePeriodSeconds', 30)
 
     if grace >= CRITICAL:
-        print(f"  {RED}[ERR]{RESET}  Pod '{pod_name}': terminationGracePeriodSeconds={grace}s (>{CRITICAL}s)"
-              f" — drain będzie zablokowany na {grace}s jeśli app nie zakończy się wcześniej")
+        print(f"  {RED}[ERR]{RESET}  Pod '{pod_name}': terminationGracePeriodSeconds={grace}s"
+              f" — drain zablokowany na {grace}s jeśli app nie zakończy się wcześniej")
         long_grace.append(pod_name)
     elif grace > THRESHOLD:
         print(f"  {YELLOW}[WARN]{RESET} Pod '{pod_name}': terminationGracePeriodSeconds={grace}s (>{THRESHOLD}s)"
@@ -869,7 +842,7 @@ if ok_pods > 0:
 if not long_grace and ok_pods == 0:
     print(f"  {GREEN}[OK]{RESET}  Brak działających podów do sprawdzenia")
 
-PYEOF7
+PYEOF_GRACE
 
 # ---------------------------------------------------------------------------
 # 7. Symulacja drain — co zostałoby wyparte (--dry-run)
