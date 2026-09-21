@@ -7,3 +7,6 @@ build/
 .venv/
 venv/
 *.egg
+
+# ocmirror: raporty preflight zawierają dane klastra — nie commitujemy
+ocmirror/reports/

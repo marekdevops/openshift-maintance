@@ -1,4 +1,15 @@
-# ocp-sizer
+# openshift-maintance
+
+Narzędzia do utrzymania klastrów OpenShift:
+
+| Narzędzie | Opis |
+|---|---|
+| [`ocmirror/`](ocmirror/README.md) | aktualizacja OpenShift 4.20+ w środowisku bez internetu (oc-mirror v2 + mini Quay na bastionie + lokalny OSUS) |
+| `drain_preflight.sh` | pasywna analiza namespace pod kątem `oc adm node drain` |
+| `drain_watchdog.py` | watchdog wymuszający drain podczas aktualizacji |
+| `ocp_sizer/` | analiza zasobów i sizing klastra (opis poniżej) |
+
+## ocp-sizer
 
 Narzędzie CLI do analizy zasobów OpenShift per namespace i rekomendacji sizingu nowego klastra.
 

@@ -1,0 +1,118 @@
+# =============================================================================
+# mirror-vars.yaml — zmienne dla procesu aktualizacji offline OpenShift
+# =============================================================================
+# To jest JEDYNE miejsce, w którym opisujesz, CO ma zostać zmirrorowane
+# i GDZIE. Wszystkie skrypty (02..05) czytają ten plik.
+#
+# Jak go przygotować:
+#   1. Uruchom bin/01-preflight.sh — wygeneruje szkic tego pliku na podstawie
+#      tego, co faktycznie działa na klastrze (wersja, operatory, kanały).
+#   2. Przejrzyj szkic, uzupełnij sekcję "registry" i zapisz go jako
+#      config/mirror-vars.yaml (albo w dowolnym miejscu i podawaj przez -f).
+#   3. Trzymaj plik w repozytorium (Git) — to jest dokumentacja zmiany.
+# =============================================================================
+
+cluster:
+  # Nazwa używana tylko w nazwach katalogów i raportów
+  name: ocp-prod
+  # Architektura release: amd64 | arm64 | ppc64le | s390x | multi
+  architecture: amd64
+
+platform:
+  # Kanał, w którym leży wersja DOCELOWA. Przy przejściu 4.20 -> 4.21 jest to
+  # stable-4.21 (ten kanał zawiera też wersje 4.20.z, z których są krawędzie do 4.21).
+  channel: stable-4.21
+  # Wersja, na której klaster jest teraz (minVersion w ImageSetConfiguration).
+  # Musi zostać zmirrorowana — po odcięciu internetu węzły nadal jej potrzebują.
+  currentVersion: "4.20.12"
+  # Wersja docelowa (maxVersion) — z raportu preflight.
+  targetVersion: "4.21.32"
+  # true = tylko wersje na najkrótszej ścieżce current -> target (mniej GB).
+  shortestPath: true
+  # true = oc-mirror zbuduje obraz graph-data dla lokalnego OpenShift Update Service (OSUS).
+  # Red Hat rekomenduje OSUS jako preferowaną metodę aktualizacji w środowisku disconnected.
+  graph: true
+
+registry:
+  # FQDN:port rejestru na bastionie (mirror registry for Red Hat OpenShift = mini Quay).
+  # FQDN musi rozwiązywać się w DNS — dla bastionu i dla WSZYSTKICH węzłów klastra.
+  host: bastion.bank.local:8443
+  # Organizacja/prefiks w Quay, pod który trafią obrazy (tworzona automatycznie przy push).
+  namespace: ocp
+  # Lokalizacja instalacji mini Quay (konfiguracja + certyfikaty).
+  quayRoot: /data/quay/quay-install
+  # Dane obrazów — duży, dedykowany system plików (min. 500 GB, zalecane 1 TB).
+  quayStorage: /data/quay/storage
+  # Baza SQLite Quay.
+  sqliteStorage: /data/quay/sqlite
+  # CA, którym podpisany jest certyfikat rejestru. Dla certyfikatu generowanego
+  # przez instalator: <quayRoot>/quay-rootCA/rootCA.pem. Dla certyfikatu z bankowego
+  # PKI: plik z łańcuchem CA.
+  caFile: /data/quay/quay-install/quay-rootCA/rootCA.pem
+
+mirror:
+  # m2d-d2m — mirror-to-disk + disk-to-mirror (ZALECANE): cache umożliwia wznowienie
+  #           po błędzie, przyrostowy mirror i kasowanie starych obrazów; archiwum
+  #           .tar jest artefaktem, który można zarchiwizować / przeskanować.
+  # m2m     — mirror-to-mirror: szybciej i mniej dysku, ale bez cache (błąd = od nowa)
+  #           i bez możliwości późniejszego kasowania obrazów przez oc-mirror.
+  workflow: m2d-d2m
+  # Katalog roboczy oc-mirror: cache/, archive/, results/, logs/ (min. 500 GB).
+  baseDir: /data/oc-mirror
+  # Plik z poświadczeniami: pull secret z console.redhat.com + login do mini Quay.
+  # NIE jest to pull secret dla klastra (ma prawo zapisu do rejestru).
+  authFile: /data/oc-mirror/auth/auth.json
+  parallelImages: 4       # 1-10
+  parallelLayers: 5       # 1-10
+  # Maksymalny rozmiar pojedynczego archiwum (GiB) — wygodne przy przenoszeniu nośnikami.
+  archiveSizeGiB: 10
+
+tools:
+  # Kanał, z którego 02-setup-bastion.sh pobierze oc i oc-mirror.
+  # Red Hat zaleca najnowszy oc-mirror niezależnie od mirrorowanej wersji OCP.
+  clientChannel: stable-4.21
+
+osus:
+  # Kanał operatora OpenShift Update Service (pakiet cincinnati-operator).
+  channel: v1
+  namespace: openshift-update-service
+
+# -----------------------------------------------------------------------------
+# Operatory (OLM). Dla każdego katalogu podaj wersje indeksu (tag = linia OCP).
+# Przy przejściu między wersjami minor mirroruj OBIE linie (np. v4.20 i v4.21):
+#   - v4.20: aby przed aktualizacją klastra podnieść operatory do wersji
+#            wspierających 4.21,
+#   - v4.21: aby po aktualizacji klastra przełączyć katalogi na nową linię.
+#
+# Dla pakietu:
+#   channel    — kanał z Subscription (preflight wpisuje go automatycznie)
+#   minVersion — (opcjonalnie) zainstalowana wersja; mirrorowane są wszystkie wersje
+#                od niej do "głowy" kanału, co daje OLM kompletną ścieżkę aktualizacji.
+#                Bez minVersion mirrorowana jest tylko najnowsza wersja w kanale.
+#
+# oc-mirror NIE dociąga zależności operatorów — każdy wymagany pakiet wpisz jawnie.
+# -----------------------------------------------------------------------------
+operators:
+  - catalog: registry.redhat.io/redhat/redhat-operator-index
+    versions: [v4.20, v4.21]
+    packages:
+      - name: cincinnati-operator        # OpenShift Update Service — wymagany dla graph: true
+        channel: v1
+      - name: local-storage-operator
+        channel: stable
+      - name: openshift-gitops-operator
+        channel: latest
+
+  # - catalog: registry.redhat.io/redhat/certified-operator-index
+  #   versions: [v4.20, v4.21]
+  #   packages:
+  #     - name: <pakiet>
+  #       channel: <kanał>
+
+# -----------------------------------------------------------------------------
+# Dodatkowe obrazy (np. narzędzia diagnostyczne). Zawsze PEŁNA nazwa z rejestrem.
+# Obraz po tagu powoduje wygenerowanie ImageTagMirrorSet, którego utworzenie
+# wywołuje restart węzłów — preferuj odwołania po digest (@sha256:...).
+# -----------------------------------------------------------------------------
+additionalImages: []
+#  - registry.redhat.io/ubi9/ubi-minimal@sha256:<digest>
