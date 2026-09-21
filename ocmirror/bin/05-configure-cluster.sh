@@ -249,11 +249,12 @@ stage_catalogs() {
     fi
 
     # 2. Przepięcie Subscription na katalog z mirrora (ta sama rodzina indeksu, linia CATALOG_TAG)
-    local subs cs_all plan
-    subs=$(oc get subscriptions.operators.coreos.com -A -o json)
-    cs_all=$(oc get catalogsources.operators.coreos.com -A -o json)
-    plan=$(jq -r --argjson subs "$subs" --argjson cs "$cs_all" --arg tag "$CATALOG_TAG" -s '
-        . as $mirrored
+    local plan
+    oc get subscriptions.operators.coreos.com -A -o json >"$TMP_DIR/subs.json"
+    oc get catalogsources.operators.coreos.com -A -o json >"$TMP_DIR/catsrc.json"
+    plan=$(jq -r --slurpfile subs "$TMP_DIR/subs.json" --slurpfile cs "$TMP_DIR/catsrc.json" \
+               --arg tag "$CATALOG_TAG" -s '
+        . as $mirrored | $subs[0] as $subs | $cs[0] as $cs
         | def base: sub("[@:][^/]*$"; "") | split("/") | last;
           def default_base: {"redhat-operators": "redhat-operator-index", "certified-operators": "certified-operator-index",
                              "redhat-marketplace": "redhat-marketplace-index", "community-operators": "community-operator-index"};

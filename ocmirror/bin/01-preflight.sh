@@ -194,20 +194,27 @@ log_info "Przypomnienie: przed aktualizacją wykonaj backup etcd (cluster-backup
 # ---------------------------------------------------------------------------
 log_section "3. Zainstalowane operatory (OLM)"
 
-SUBS=$(oc get subscriptions.operators.coreos.com -A -o json)
-CSVS=$(oc get csv -A -o json)
-CATSRC=$(oc get catalogsources.operators.coreos.com -A -o json)
+# Dane trafiają do plików i jq czyta je przez --slurpfile: JSON z dużego klastra
+# przekracza limit długości argumentów (ARG_MAX), gdyby podać go przez --argjson.
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
+oc get subscriptions.operators.coreos.com -A -o json >"$TMP_DIR/subs.json"
+# Bez kopii CSV (label olm.copiedFrom) — operatory AllNamespaces mają kopię w każdym namespace
+oc get csv -A -l '!olm.copiedFrom' -o json >"$TMP_DIR/csvs.json"
+oc get catalogsources.operators.coreos.com -A -o json >"$TMP_DIR/catsrc.json"
 
 # Łączymy Subscription + CSV + CatalogSource w jeden obiekt na operator.
 # Obraz indeksu mapujemy na nazwę kanoniczną w registry.redhat.io, dzięki czemu
 # działa to także wtedy, gdy klaster korzysta już z katalogów z mirrora.
-OPERATORS_JSON=$(jq -n --argjson subs "$SUBS" --argjson csvs "$CSVS" --argjson cs "$CATSRC" '
+OPERATORS_JSON=$(jq -n --slurpfile subs "$TMP_DIR/subs.json" --slurpfile csvs "$TMP_DIR/csvs.json" \
+                       --slurpfile cs "$TMP_DIR/catsrc.json" '
   def canonical_index:
     (sub("[@:][^/]*$"; "") | split("/") | last) as $base
     | if ($base | IN("redhat-operator-index","certified-operator-index","redhat-marketplace-index","community-operator-index"))
       then "registry.redhat.io/redhat/" + $base
       else sub("[@:][^/]*$"; "") end;
-  [ $subs.items[] as $s
+  $subs[0] as $subs | $csvs[0] as $csvs | $cs[0] as $cs
+  | [ $subs.items[] as $s
     | ($csvs.items | map(select(.metadata.namespace == $s.metadata.namespace
                                  and .metadata.name == ($s.status.installedCSV // ""))) | first) as $csv
     | ($cs.items | map(select(.metadata.name == $s.spec.source
@@ -273,7 +280,7 @@ done
 
 DISABLED_DEFAULTS=$(oc get operatorhub cluster -o jsonpath='{.spec.disableAllDefaultSources}' 2>/dev/null || true)
 log_info "OperatorHub disableAllDefaultSources: ${DISABLED_DEFAULTS:-false}"
-jq -r '.items[] | "\(.metadata.namespace)/\(.metadata.name)\t\(.spec.image // "-")\t\(.status.connectionState.lastObservedState // "?")"' <<<"$CATSRC" \
+jq -r '.items[] | "\(.metadata.namespace)/\(.metadata.name)\t\(.spec.image // "-")\t\(.status.connectionState.lastObservedState // "?")"' "$TMP_DIR/catsrc.json" \
     | while IFS=$'\t' read -r n img state; do log_info "CatalogSource $n [$state] $img"; done
 
 IMG_CFG=$(oc get image.config.openshift.io cluster -o json)
