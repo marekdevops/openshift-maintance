@@ -47,6 +47,7 @@ mówią CRI-O na każdym węźle: „zanim pójdziesz do internetu, pobierz to z
 ```
 ocmirror/
 ├── bin/
+│   ├── 00-inspect-quay.sh        # inwentaryzacja istniejącego mini Quay (też z sudo) -> sekcja registry: (tylko odczyt)
 │   ├── 01-preflight.sh           # analiza klastra + graf aktualizacji Red Hat + szkic zmiennych (tylko odczyt)
 │   ├── 02-setup-bastion.sh       # oc, oc-mirror, opm, mini Quay, CA, firewall, auth.json (idempotentny)
 │   ├── 03-generate-imageset.py   # mirror-vars.yaml -> ImageSetConfiguration (walidacja reguł oc-mirror)
@@ -68,6 +69,10 @@ Wszystko uruchamiasz **na bastionie**, jako dedykowany użytkownik (np. `mirror`
 zalogowany do klastra (`oc login`) jako `cluster-admin`.
 
 ```bash
+# (jeśli mini Quay już działa na bastionie — np. uruchomiony przez sudo)
+bin/00-inspect-quay.sh --export-ca /data/oc-mirror/auth/quay-rootCA.pem
+#    -> gotowa sekcja registry: do mirror-vars.yaml
+
 # 0. Analiza klastra i możliwych aktualizacji (tylko odczyt)
 bin/01-preflight.sh
 #    -> reports/<klaster>-<data>/{preflight-report.txt, mirror-vars.yaml, operators.json, update-path.json}

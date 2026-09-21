@@ -130,7 +130,37 @@ mkdir -p /data/quay /data/oc-mirror && chown -R mirror:mirror /data/quay /data/o
 Pobierz z <https://console.redhat.com/openshift/downloads> → *Tokens* → *Pull secret*
 i zapisz na bastionie jako `~/pull-secret.txt` (prawa `600`).
 
-### 4.4. Instalacja (skrypt 02)
+### 4.4. Mini Quay już zainstalowany? Inwentaryzacja (skrypt 00)
+
+Jeśli mini Quay działa już na bastionie (np. zainstalowany i uruchamiany przez `sudo podman`),
+nie instaluj go ponownie. Odczytaj jego ustawienia:
+
+```bash
+bin/00-inspect-quay.sh --export-ca /data/oc-mirror/auth/quay-rootCA.pem
+# porównanie z istniejącym plikiem zmiennych:
+bin/00-inspect-quay.sh -f config/mirror-vars.yaml --export-ca /data/oc-mirror/auth/quay-rootCA.pem
+```
+
+Skrypt 🟢 tylko czyta. Sam wykrywa, czy Quay działa jako root (`sudo podman`), czy rootless, i sprawdza:
+
+| Obszar | Skąd | Do którego pola |
+|---|---|---|
+| hostname:port | `SERVER_HOSTNAME` w `quay-config/config.yaml` | `registry.host` |
+| katalog instalacji | punkt montowania `/quay-registry/conf/stack` kontenera `quay-app` | `registry.quayRoot` |
+| dane obrazów / SQLite | punkty montowania `/datastorage`, `/sqlite` (wolumen Podman = pole puste) | `registry.quayStorage`, `registry.sqliteStorage` |
+| CA | `<quayRoot>/quay-rootCA/rootCA.pem`, sprawdzone `openssl verify` względem `ssl.cert` | `registry.caFile` |
+| organizacje z obrazami | `/v2/_catalog` z poświadczeniami z `auth.json` | `registry.namespace` |
+
+Dodatkowo: stan kontenerów i usług systemd, SAN i termin ważności certyfikatu, DNS, port, firewall,
+`/health/instance` z weryfikacją TLS, wolne miejsce. Sekrety z `config.yaml` nie są wypisywane.
+
+> **Instalacja przez sudo:** pliki Quay (w tym CA) leżą wtedy w katalogu root (np. `/root/quay-install`),
+> nieczytelnym dla użytkownika `mirror`. Opcja `--export-ca` kopiuje CA (to certyfikat publiczny)
+> do wskazanego pliku z prawami `0644` — ten plik wpisz jako `registry.caFile`.
+> Pozostałe skrypty uruchamiaj jak dotąd, jako `mirror`. `02-setup-bastion.sh` wykryje działający
+> Quay i pominie instalację.
+
+### 4.5. Instalacja (skrypt 02)
 
 Najpierw skopiuj przykładowe zmienne i uzupełnij sekcje `registry`, `mirror`, `tools`
 (resztę uzupełni preflight w fazie B):
@@ -156,7 +186,7 @@ Co robi skrypt (każdy krok jest pomijany, jeśli już wykonany):
 > W banku zwykle wymagany jest certyfikat z wewnętrznego PKI — wymień go zgodnie z rozdz. 12.3
 > i wskaż łańcuch CA w `registry.caFile`.
 
-### 4.5. Organizacja i konto robota (ręcznie, w przeglądarce) — PRZED pierwszym mirrorem
+### 4.6. Organizacja i konto robota (ręcznie, w przeglądarce) — PRZED pierwszym mirrorem
 
 Klaster **nie może** używać konta `init` — ma ono prawo zapisu (ostrzeżenie w dokumentacji,
 rozdz. 5.3.2). Tworzymy konto robota tylko do odczytu:
@@ -690,7 +720,7 @@ przez garbage collection w tle (z opóźnieniem).
 |---|---|---|
 | `x509: certificate signed by unknown authority` (bastion) | CA mini Quay nie jest zaufane | `02-setup-bastion.sh` (krok 5) lub ręcznie `update-ca-trust` |
 | `x509` na węzłach / pody `ErrImagePull` z mirrora | brak CA w `additionalTrustedCA` lub zły klucz | etap `trust`; klucz musi mieć postać `fqdn..8443` |
-| `unauthorized` przy pobieraniu z mirrora | brak/zły token w pull secret, robot bez *Read* | etap `pullsecret`; uprawnienia robota (rozdz. 4.5) |
+| `unauthorized` przy pobieraniu z mirrora | brak/zły token w pull secret, robot bez *Read* | etap `pullsecret`; uprawnienia robota (rozdz. 4.6) |
 | `pasta failed ... External interface not usable` | Podman 5 bez domyślnej trasy | rozdz. 4.1 (slirp4netns) |
 | oc-mirror: `too many open files` | niski `ulimit -n` | skrypt podnosi limit; ew. `/etc/security/limits.d/` |
 | oc-mirror: `multiple channel heads` | `maxVersion` odcina głowę kanału | usuń `maxVersion` / obniż `minVersion` (rozdz. 5.13) |

@@ -149,7 +149,11 @@ log_section "4. Mirror registry (mini Quay)"
 if [[ $SKIP_REGISTRY -eq 1 ]]; then
     log_info "Pominięto (--skip-registry)"
 elif systemctl --user is-active --quiet quay-app 2>/dev/null; then
-    log_ok "Mini Quay już działa (systemctl --user status quay-app)"
+    log_ok "Mini Quay już działa — rootless (systemctl --user status quay-app)"
+    log_info "Aktualizacja wersji rejestru: ./mirror-registry upgrade -v (patrz docs/INSTRUKCJA.md)"
+elif systemctl is-active --quiet quay-app 2>/dev/null; then
+    log_ok "Mini Quay już działa — rootful/sudo (sudo systemctl status quay-app)"
+    log_info "Wartości do registry.* odczytasz skryptem: bin/00-inspect-quay.sh"
     log_info "Aktualizacja wersji rejestru: ./mirror-registry upgrade -v (patrz docs/INSTRUKCJA.md)"
 else
     MR_DIR="$TOOLS_DIR/mirror-registry"
@@ -183,7 +187,7 @@ fi
 # ---------------------------------------------------------------------------
 log_section "5. Certyfikat CA i firewall"
 
-if [[ -f "$CA_FILE" ]]; then
+if sudo test -f "$CA_FILE"; then        # sudo: CA instalacji rootful leży w /root/...
     ANCHOR="/etc/pki/ca-trust/source/anchors/mirror-registry-${REG_FQDN}.pem"
     if ! sudo cmp -s "$CA_FILE" "$ANCHOR" 2>/dev/null; then
         sudo cp "$CA_FILE" "$ANCHOR"
@@ -192,7 +196,8 @@ if [[ -f "$CA_FILE" ]]; then
     else
         log_ok "CA rejestru już zaufane"
     fi
-    log_info "Ważność certyfikatu CA: $(openssl x509 -in "$CA_FILE" -noout -enddate | cut -d= -f2)"
+    log_info "Ważność certyfikatu CA: $(sudo cat "$CA_FILE" | openssl x509 -noout -enddate | cut -d= -f2)"
+    [[ -r "$CA_FILE" ]] || log_warn "$CA_FILE czytelny tylko dla root — 05-configure-cluster.sh go nie odczyta; użyj: bin/00-inspect-quay.sh --export-ca <plik>"
 else
     log_warn "Brak pliku CA: $CA_FILE (sprawdź registry.caFile)"
 fi
