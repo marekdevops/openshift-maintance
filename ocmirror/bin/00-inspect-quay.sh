@@ -2,10 +2,13 @@
 # 00-inspect-quay.sh — inwentaryzacja istniejącego mini Quay na bastionie i wartości do mirror-vars.yaml.
 #
 # Użycie:
-#   ./00-inspect-quay.sh [-f config/mirror-vars.yaml] [-o fragment.yaml] [--export-ca PLIK]
+#   ./00-inspect-quay.sh [-f config/mirror-vars.yaml] [-a auth.json] [-o fragment.yaml] [--export-ca PLIK]
 #
 # Opcje:
 #   -f PLIK            porównaj wykryte wartości z istniejącym plikiem zmiennych
+#   -a, --authfile PLIK  plik poświadczeń (auth.json) do testu logowania; bez tej opcji szukane są:
+#                      mirror.authFile z -f, $REGISTRY_AUTH_FILE, $XDG_RUNTIME_DIR/containers/auth.json,
+#                      ~/.docker/config.json
 #   -o PLIK            zapisz wykrytą sekcję "registry:" do pliku (domyślnie tylko na ekran)
 #   --export-ca PLIK   skopiuj CA rejestru w miejsce czytelne dla użytkownika bez sudo
 #                      (np. /data/oc-mirror/auth/quay-rootCA.pem) i użyj go jako registry.caFile
@@ -28,12 +31,14 @@ source "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
 VARS_FILE=""
 OUT_FILE=""
 EXPORT_CA=""
+AUTH_ARG=""
 
 usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -f) VARS_FILE="$2"; shift 2 ;;
+        -a|--authfile) AUTH_ARG="$2"; shift 2 ;;
         -o) OUT_FILE="$2"; shift 2 ;;
         --export-ca) EXPORT_CA="$2"; shift 2 ;;
         -h|--help) usage 0 ;;
@@ -269,8 +274,19 @@ fi
 log_section "6. Poświadczenia i repozytoria"
 
 AUTH_CANDIDATES=()
-[[ -n "$VARS_FILE" ]] && AUTH_CANDIDATES+=("$(expand_path "$(cfg mirror.authFile "")")")
-AUTH_CANDIDATES+=("${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/containers/auth.json" "$HOME/.docker/config.json")
+if [[ -n "$AUTH_ARG" ]]; then
+    # Plik wskazany jawnie: używamy tylko jego i mówimy dokładnie, czego w nim brakuje
+    [[ -r "$AUTH_ARG" ]] || die "Nie można odczytać pliku poświadczeń: $AUTH_ARG (brak pliku lub uprawnień — nie używaj sudo do jego tworzenia)"
+    jq -e '.auths' "$AUTH_ARG" &>/dev/null || die "$AUTH_ARG nie jest poprawnym plikiem auth.json (brak sekcji .auths)"
+    if ! jq -e --arg r "$REG_HOST" '.auths[$r]' "$AUTH_ARG" &>/dev/null; then
+        log_error "W $AUTH_ARG brak wpisu dla $REG_HOST. Wpisy w pliku: $(jq -r '.auths | keys | join(", ")' "$AUTH_ARG")"
+        log_info "  Klucz musi być identyczny z SERVER_HOSTNAME (razem z portem). Dopisz: podman login --authfile $AUTH_ARG $REG_HOST"
+    fi
+    AUTH_CANDIDATES+=("$AUTH_ARG")
+else
+    [[ -n "$VARS_FILE" ]] && AUTH_CANDIDATES+=("$(expand_path "$(cfg mirror.authFile "")")")
+    AUTH_CANDIDATES+=("${REGISTRY_AUTH_FILE:-}" "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/containers/auth.json" "$HOME/.docker/config.json")
+fi
 
 AUTH_FILE=""
 for f in "${AUTH_CANDIDATES[@]}"; do
@@ -281,7 +297,7 @@ done
 
 if [[ -z "$AUTH_FILE" ]]; then
     log_info "Brak zapisanych poświadczeń dla $REG_HOST (sprawdzone: ${AUTH_CANDIDATES[*]})"
-    log_info "  Zaloguj się: podman login --authfile /data/oc-mirror/auth/auth.json $REG_HOST"
+    log_info "  Zaloguj się: podman login --authfile ${AUTH_ARG:-/data/oc-mirror/auth/auth.json} $REG_HOST"
 else
     CREDS=$(jq -r --arg r "$REG_HOST" '.auths[$r].auth' "$AUTH_FILE" | base64 -d)
     log_info "Poświadczenia: $AUTH_FILE (użytkownik: ${CREDS%%:*})"

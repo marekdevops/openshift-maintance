@@ -138,7 +138,7 @@ nie instaluj go ponownie. Odczytaj jego ustawienia:
 ```bash
 bin/00-inspect-quay.sh --export-ca /data/oc-mirror/auth/quay-rootCA.pem
 # porównanie z istniejącym plikiem zmiennych:
-bin/00-inspect-quay.sh -f config/mirror-vars.yaml --export-ca /data/oc-mirror/auth/quay-rootCA.pem
+bin/00-inspect-quay.sh -f config/mirror-vars.yaml -a /data/oc-mirror/auth/auth.json --export-ca /data/oc-mirror/auth/quay-rootCA.pem
 ```
 
 Skrypt 🟢 tylko czyta. Sam wykrywa, czy Quay działa jako root (`sudo podman`), czy rootless, i sprawdza:
