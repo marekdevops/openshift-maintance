@@ -285,11 +285,33 @@ if [[ -z "$AUTH_FILE" ]]; then
 else
     CREDS=$(jq -r --arg r "$REG_HOST" '.auths[$r].auth' "$AUTH_FILE" | base64 -d)
     log_info "Poświadczenia: $AUTH_FILE (użytkownik: ${CREDS%%:*})"
-    # Token dla /v2/_catalog (standard Docker Registry v2, obsługiwany przez Quay)
-    TOKEN=$(curl -fsS --max-time 10 -u "$CREDS" \
-        "https://${REG_HOST}/v2/auth?service=${REG_FQDN}&scope=registry:catalog:*" 2>/dev/null | jq -r '.token // empty' || true)
+    # Standardowe logowanie Docker Registry v2 (tak samo robi podman):
+    #   1) GET /v2/ -> 401 z nagłówkiem WWW-Authenticate: Bearer realm="...",service="..."
+    #   2) GET <realm>?service=<service> z Basic auth -> token
+    #   3) GET /v2/ z tokenem -> 200 = poświadczenia działają
+    CHALLENGE=$(curl -sS --max-time 10 -o /dev/null -D - "https://${REG_HOST}/v2/" 2>/dev/null \
+                | tr -d '\r' | grep -i '^www-authenticate:' || true)
+    REALM=$(sed -nE 's/.*realm="([^"]+)".*/\1/p' <<<"$CHALLENGE")
+    SERVICE=$(sed -nE 's/.*service="([^"]+)".*/\1/p' <<<"$CHALLENGE")
+    REALM="${REALM:-https://${REG_HOST}/v2/auth}"
+    SERVICE="${SERVICE:-$REG_HOST}"
+
+    HTTP=$(curl -sS --max-time 10 -u "$CREDS" -o "$TMP_DIR/token.json" -w '%{http_code}' \
+               --get --data-urlencode "service=${SERVICE}" "$REALM" 2>"$TMP_DIR/curl.err" || true)
+    TOKEN=$(jq -r '.token // .access_token // empty' "$TMP_DIR/token.json" 2>/dev/null || true)
+    if [[ -n "$TOKEN" ]] && [[ "$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $TOKEN" "https://${REG_HOST}/v2/" 2>/dev/null)" != "200" ]]; then
+        TOKEN=""
+    fi
+
     if [[ -z "$TOKEN" ]]; then
-        log_error "Logowanie jako ${CREDS%%:*} nie powiodło się (złe hasło/token?)"
+        REASON=$(jq -r '.error // .message // (.errors // [] | .[0].message) // empty' "$TMP_DIR/token.json" 2>/dev/null | head -c 200 || true)
+        log_error "Logowanie jako ${CREDS%%:*} nie powiodło się: HTTP ${HTTP:-000} ${REASON:-$(head -c 200 "$TMP_DIR/curl.err" 2>/dev/null)}"
+        log_info "  realm=${REALM} service=${SERVICE}"
+        case "${HTTP:-000}" in
+            401|403) log_info "  Złe hasło/token w $AUTH_FILE — zaloguj ponownie: podman login --authfile $AUTH_FILE $REG_HOST" ;;
+            000)     log_info "  Brak połączenia lub błąd TLS (sprawdź punkt 5)" ;;
+        esac
     else
         log_ok "Logowanie jako ${CREDS%%:*}: OK"
         if ! curl -fsS --max-time 30 -H "Authorization: Bearer $TOKEN" "https://${REG_HOST}/v2/_catalog?n=10000" \
