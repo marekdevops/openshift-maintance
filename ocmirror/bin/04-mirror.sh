@@ -106,6 +106,10 @@ done
 log_ok "Poświadczenia: registry.redhat.io, quay.io, $REG_HOST"
 
 if [[ " ${STEPS[*]} " =~ " d2m " || " ${STEPS[*]} " =~ " m2m " ]]; then
+    if [[ -n "${https_proxy:-${HTTPS_PROXY:-}}" ]] && ! in_no_proxy "${REG_HOST%%:*}"; then
+        die "Ustawione https_proxy, a ${REG_HOST%%:*} nie jest w no_proxy — oc-mirror wysyłałby obrazy przez proxy banku.
+       Dopisz: export no_proxy=\"\${no_proxy:+\$no_proxy,}${REG_HOST%%:*}\" NO_PROXY=\"\$no_proxy\""
+    fi
     curl -fsS -o /dev/null "https://${REG_HOST}/health/instance" \
         || die "Rejestr https://${REG_HOST} nie odpowiada lub jego CA nie jest zaufane (02-setup-bastion.sh)"
     log_ok "Rejestr $REG_HOST odpowiada (TLS zaufany)"

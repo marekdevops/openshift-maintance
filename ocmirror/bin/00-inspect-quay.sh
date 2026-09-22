@@ -260,9 +260,22 @@ if systemctl is-active --quiet firewalld 2>/dev/null; then
     fi
 fi
 
-if curl -fsS -o /dev/null --max-time 10 "https://${REG_HOST}/health/instance"; then
+# Proxy: rejestr lokalny MUSI być w no_proxy — inaczej podman/oc-mirror (uruchamiane bez sudo)
+# idą do Quay przez proxy banku. sudo domyślnie czyści zmienne proxy, więc "sudo podman" działa.
+PROXY_URL="${https_proxy:-${HTTPS_PROXY:-}}"
+if [[ -z "$PROXY_URL" ]]; then
+    log_ok "Brak https_proxy dla $(id -un) — połączenia do Quay idą bezpośrednio"
+elif in_no_proxy "$REG_FQDN"; then
+    log_ok "https_proxy ustawione, ale $REG_FQDN jest w no_proxy — Quay bez proxy"
+else
+    log_error "https_proxy=${PROXY_URL} i $REG_FQDN NIE jest w no_proxy — podman/oc-mirror pójdą do Quay przez proxy banku"
+    log_info "  Dopisz (np. w ~/.bashrc użytkownika uruchamiającego skrypty):"
+    log_info "  export no_proxy=\"\${no_proxy:+\$no_proxy,}${REG_FQDN}\" NO_PROXY=\"\${NO_PROXY:+\$NO_PROXY,}${REG_FQDN}\""
+fi
+
+if curl -fsS --noproxy "$REG_FQDN" -o /dev/null --max-time 10 "https://${REG_HOST}/health/instance"; then
     log_ok "https://${REG_HOST}/health/instance — OK, TLS zaufany przez system bastionu"
-elif curl -fsSk -o /dev/null --max-time 10 "https://${REG_HOST}/health/instance"; then
+elif curl -fsSk --noproxy "$REG_FQDN" -o /dev/null --max-time 10 "https://${REG_HOST}/health/instance"; then
     log_warn "Quay odpowiada, ale bastion NIE ufa certyfikatowi — dodaj CA: sudo cp <caFile> /etc/pki/ca-trust/source/anchors/ && sudo update-ca-trust"
 else
     log_error "https://${REG_HOST}/health/instance nie odpowiada"
@@ -299,38 +312,44 @@ if [[ -z "$AUTH_FILE" ]]; then
     log_info "Brak zapisanych poświadczeń dla $REG_HOST (sprawdzone: ${AUTH_CANDIDATES[*]})"
     log_info "  Zaloguj się: podman login --authfile ${AUTH_ARG:-/data/oc-mirror/auth/auth.json} $REG_HOST"
 else
-    CREDS=$(jq -r --arg r "$REG_HOST" '.auths[$r].auth' "$AUTH_FILE" | base64 -d)
-    log_info "Poświadczenia: $AUTH_FILE (użytkownik: ${CREDS%%:*})"
-    # Standardowe logowanie Docker Registry v2 (tak samo robi podman):
-    #   1) GET /v2/ -> 401 z nagłówkiem WWW-Authenticate: Bearer realm="...",service="..."
-    #   2) GET <realm>?service=<service> z Basic auth -> token
-    #   3) GET /v2/ z tokenem -> 200 = poświadczenia działają
-    CHALLENGE=$(curl -sS --max-time 10 -o /dev/null -D - "https://${REG_HOST}/v2/" 2>/dev/null \
-                | tr -d '\r' | grep -i '^www-authenticate:' || true)
-    REALM=$(sed -nE 's/.*realm="([^"]+)".*/\1/p' <<<"$CHALLENGE")
-    SERVICE=$(sed -nE 's/.*service="([^"]+)".*/\1/p' <<<"$CHALLENGE")
-    REALM="${REALM:-https://${REG_HOST}/v2/auth}"
-    SERVICE="${SERVICE:-$REG_HOST}"
+    CREDS=$(jq -r --arg r "$REG_HOST" '.auths[$r].auth // empty' "$AUTH_FILE" | base64 -d 2>/dev/null || true)
+    LOGIN_USER="${CREDS%%:*}"
+    log_info "Poświadczenia: $AUTH_FILE (użytkownik: ${LOGIN_USER:-?})"
 
-    HTTP=$(curl -sS --max-time 10 -u "$CREDS" -o "$TMP_DIR/token.json" -w '%{http_code}' \
-               --get --data-urlencode "service=${SERVICE}" "$REALM" 2>"$TMP_DIR/curl.err" || true)
-    TOKEN=$(jq -r '.token // .access_token // empty' "$TMP_DIR/token.json" 2>/dev/null || true)
-    if [[ -n "$TOKEN" ]] && [[ "$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer $TOKEN" "https://${REG_HOST}/v2/" 2>/dev/null)" != "200" ]]; then
-        TOKEN=""
+    # Walidacja tym samym mechanizmem co oc-mirror (containers/image): podman login z istniejącymi
+    # danymi sprawdza je w rejestrze; przy złych danych prosi o nowe -> stdin=/dev/null -> błąd.
+    # Uruchamiamy jako bieżący użytkownik, czyli w tym samym środowisku (proxy!), co oc-mirror.
+    if podman login --authfile "$AUTH_FILE" "$REG_HOST" </dev/null >"$TMP_DIR/login.out" 2>&1; then
+        LOGIN_OK=1
+        log_ok "podman login --authfile $AUTH_FILE $REG_HOST: poświadczenia ważne (jako $(id -un))"
+    else
+        LOGIN_OK=0
+        log_error "podman login jako $(id -un) nie powiódł się: $(tr '\n' ' ' <"$TMP_DIR/login.out" | head -c 300)"
+        if [[ $EUID -ne 0 ]] && sudo podman login --authfile "$AUTH_FILE" "$REG_HOST" </dev/null &>/dev/null; then
+            log_info "  Przez sudo DZIAŁA — różnica to środowisko użytkownika, najczęściej https_proxy (patrz punkt 5)."
+        else
+            log_info "  Zaloguj ponownie: podman login --authfile $AUTH_FILE $REG_HOST"
+        fi
     fi
 
-    if [[ -z "$TOKEN" ]]; then
-        REASON=$(jq -r '.error // .message // (.errors // [] | .[0].message) // empty' "$TMP_DIR/token.json" 2>/dev/null | head -c 200 || true)
-        log_error "Logowanie jako ${CREDS%%:*} nie powiodło się: HTTP ${HTTP:-000} ${REASON:-$(head -c 200 "$TMP_DIR/curl.err" 2>/dev/null)}"
-        log_info "  realm=${REALM} service=${SERVICE}"
-        case "${HTTP:-000}" in
-            401|403) log_info "  Złe hasło/token w $AUTH_FILE — zaloguj ponownie: podman login --authfile $AUTH_FILE $REG_HOST" ;;
-            000)     log_info "  Brak połączenia lub błąd TLS (sprawdź punkt 5)" ;;
-        esac
+    # Lista repozytoriów — tylko informacyjnie (standardowy przepływ tokenu Registry v2, bez proxy)
+    TOKEN=""
+    if (( LOGIN_OK )) && [[ -n "$CREDS" ]]; then
+        CHALLENGE=$(curl -sS --noproxy "$REG_FQDN" --max-time 10 -o /dev/null -D - "https://${REG_HOST}/v2/" 2>/dev/null \
+                    | tr -d '\r' | grep -i '^www-authenticate:' || true)
+        REALM=$(sed -nE 's/.*realm="([^"]+)".*/\1/p' <<<"$CHALLENGE")
+        SERVICE=$(sed -nE 's/.*service="([^"]+)".*/\1/p' <<<"$CHALLENGE")
+        TOKEN=$(curl -sS --noproxy "$REG_FQDN" --max-time 10 -u "$CREDS" --get \
+                    --data-urlencode "account=${LOGIN_USER}" --data-urlencode "service=${SERVICE:-$REG_HOST}" \
+                    "${REALM:-https://${REG_HOST}/v2/auth}" 2>/dev/null | jq -r '.token // .access_token // empty' 2>/dev/null || true)
+    fi
+
+    if (( ! LOGIN_OK )); then
+        :
+    elif [[ -z "$TOKEN" ]]; then
+        log_info "Nie udało się pobrać listy repozytoriów przez API — sprawdź zawartość w UI Quay"
     else
-        log_ok "Logowanie jako ${CREDS%%:*}: OK"
-        if ! curl -fsS --max-time 30 -H "Authorization: Bearer $TOKEN" "https://${REG_HOST}/v2/_catalog?n=10000" \
+        if ! curl -fsS --noproxy "$REG_FQDN" --max-time 30 -H "Authorization: Bearer $TOKEN" "https://${REG_HOST}/v2/_catalog?n=10000" \
                 | jq -r '.repositories // [] | .[]' >"$TMP_DIR/repos.txt" 2>/dev/null; then
             : >"$TMP_DIR/repos.txt"
             log_info "Nie udało się pobrać listy repozytoriów (/v2/_catalog) — sprawdź w UI Quay"

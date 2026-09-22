@@ -86,4 +86,17 @@ confirm() {
     [[ "$answer" =~ ^(t|tak|y|yes)$ ]]
 }
 
+# in_no_proxy <host> — czy host jest objęty $no_proxy/$NO_PROXY (dokładnie, domena ".x" lub "*").
+# Lokalny rejestr musi tam być: bez tego podman/oc-mirror idą do niego przez proxy banku.
+in_no_proxy() {
+    local host="$1" entry list
+    IFS=',' read -r -a list <<<"${no_proxy:-${NO_PROXY:-}}"
+    for entry in "${list[@]}"; do
+        entry="${entry// /}"; entry="${entry%%:*}"
+        [[ -z "$entry" ]] && continue
+        if [[ "$entry" == "*" || "$host" == "$entry" || "$host" == *".${entry#.}" ]]; then return 0; fi
+    done
+    return 1
+}
+
 timestamp() { date '+%Y%m%d-%H%M%S'; }
