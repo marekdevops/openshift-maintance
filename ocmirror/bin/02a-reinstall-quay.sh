@@ -242,8 +242,16 @@ if (( ${#OLD_CONTAINERS[@]} + ${#OLD_UNITS[@]} + ${#OLD_VOLUMES[@]} + ${#OLD_DIR
     log_warn "Usunięcie starej instalacji skasuje WSZYSTKIE obrazy w tym Quay (zmirrorowane dane oc-mirror)."
     log_info "Cache oc-mirror ($BASE_DIR/cache, archive/) zostaje — obrazy wrócą przez 04-mirror.sh --step d2m."
     if [[ "$ASSUME_YES" != "1" ]]; then
-        read -r -p "$(echo -e "${YELLOW}?${RESET} Aby potwierdzić, wpisz nazwę rejestru (${REG_FQDN}): ")" answer
-        [[ "$answer" == "$REG_FQDN" ]] || die "Przerwano — nic nie zostało zmienione"
+        read -r -p "$(echo -e "${YELLOW}?${RESET} Aby potwierdzić, wpisz nazwę rejestru (${REG_FQDN}): ")" answer </dev/tty
+        # Tolerancja: wielkość liter, spacje, końcowa kropka; akceptujemy FQDN, FQDN:port lub krótką nazwę
+        norm() { tr -d '[:space:]\r' <<<"$1" | tr '[:upper:]' '[:lower:]' | sed 's/\.$//'; }
+        typed=$(norm "$answer")
+        accepted=("$(norm "$REG_FQDN")" "$(norm "$REG_HOST")" "$(norm "${REG_FQDN%%.*}")")
+        if [[ ! " ${accepted[*]} " == *" ${typed} "* || -z "$typed" ]]; then
+            die "Przerwano — nic nie zostało zmienione.
+       Wpisano: '${answer}'. Oczekiwano jednej z: ${accepted[*]} (z registry.host w $VARS_FILE)"
+        fi
+        log_ok "Potwierdzono: $typed"
     fi
 
     # -----------------------------------------------------------------------
