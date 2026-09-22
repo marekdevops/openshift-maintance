@@ -316,20 +316,48 @@ else
     LOGIN_USER="${CREDS%%:*}"
     log_info "Poświadczenia: $AUTH_FILE (użytkownik: ${LOGIN_USER:-?})"
 
-    # Walidacja tym samym mechanizmem co oc-mirror (containers/image): podman login z istniejącymi
-    # danymi sprawdza je w rejestrze; przy złych danych prosi o nowe -> stdin=/dev/null -> błąd.
-    # Uruchamiamy jako bieżący użytkownik, czyli w tym samym środowisku (proxy!), co oc-mirror.
-    if podman login --authfile "$AUTH_FILE" "$REG_HOST" </dev/null >"$TMP_DIR/login.out" 2>&1; then
+    # Walidacja: "<narzędzie> login" z istniejącymi danymi sprawdza je w rejestrze, a przy złych
+    # prosi o nowe (stdin=/dev/null -> błąd). Preferujemy skopeo: ta sama biblioteka co oc-mirror
+    # (containers/image), bez środowiska rootless podmana. Uwaga: to Twój użytkownik LINUKSA uruchamia
+    # narzędzie; do Quay logujemy się użytkownikiem zapisanym w auth.json.
+    LOGIN_TOOL=podman
+    command -v skopeo &>/dev/null && LOGIN_TOOL=skopeo
+
+    # try_login [sudo] — zwraca kod narzędzia; błędy w login.err, ostrzeżenia w login.warn
+    try_login() {
+        local rc=0
+        $1 "$LOGIN_TOOL" login --authfile "$AUTH_FILE" "$REG_HOST" </dev/null >"$TMP_DIR/login.out" 2>&1 || rc=$?
+        grep -iE '^(WARN|time=.*level=warn)' "$TMP_DIR/login.out" >"$TMP_DIR/login.warn" || true
+        grep -viE '^(WARN|time=.*level=warn)' "$TMP_DIR/login.out" | grep -v '^Authenticating with existing' >"$TMP_DIR/login.err" || true
+        return "$rc"
+    }
+
+    LOGIN_OK=0
+    if try_login ""; then
         LOGIN_OK=1
-        log_ok "podman login --authfile $AUTH_FILE $REG_HOST: poświadczenia ważne (jako $(id -un))"
+        log_ok "$LOGIN_TOOL login jako Linux:$(id -un) -> Quay:${LOGIN_USER:-?}: poświadczenia ważne"
     else
-        LOGIN_OK=0
-        log_error "podman login jako $(id -un) nie powiódł się: $(tr '\n' ' ' <"$TMP_DIR/login.out" | head -c 300)"
-        if [[ $EUID -ne 0 ]] && sudo podman login --authfile "$AUTH_FILE" "$REG_HOST" </dev/null &>/dev/null; then
-            log_info "  Przez sudo DZIAŁA — różnica to środowisko użytkownika, najczęściej https_proxy (patrz punkt 5)."
+        USER_ERR=$(tr '\n' ' ' <"$TMP_DIR/login.err")
+        if [[ $EUID -ne 0 ]] && try_login sudo; then
+            if [[ "$LOGIN_TOOL" == "podman" ]]; then
+                # Hasło dobre; problem dotyczy tylko rootless podmana na tym koncie — oc-mirror go nie używa
+                LOGIN_OK=1
+                log_ok "Poświadczenia Quay:${LOGIN_USER:-?} ważne (sprawdzone przez sudo podman)"
+                log_warn "podman bez sudo na koncie $(id -un) nie działa: ${USER_ERR:-brak szczegółów}"
+                log_info "  Nie blokuje oc-mirror (nie używa podmana). Do testów logowania zainstaluj skopeo: sudo dnf install -y skopeo"
+            else
+                log_error "skopeo login działa przez sudo, a jako $(id -un) nie: ${USER_ERR:-brak szczegółów}"
+                log_info "  Różnica środowiska (proxy, zaufane CA, uprawnienia do pliku) — oc-mirror jako $(id -un) trafi na ten sam problem."
+            fi
         else
-            log_info "  Zaloguj ponownie: podman login --authfile $AUTH_FILE $REG_HOST"
+            log_error "$LOGIN_TOOL login do $REG_HOST nie powiódł się: ${USER_ERR:-$(tr '\n' ' ' <"$TMP_DIR/login.err")}"
+            log_info "  Jeśli to złe hasło: $LOGIN_TOOL login --authfile $AUTH_FILE -u ${LOGIN_USER:-init} $REG_HOST"
         fi
+    fi
+    if [[ -s "$TMP_DIR/login.warn" ]]; then
+        log_info "Ostrzeżenia $LOGIN_TOOL (nie wpływają na wynik): $(head -c 200 "$TMP_DIR/login.warn" | tr '\n' ' ')"
+        grep -q "decode the keys" "$TMP_DIR/login.warn" \
+            && log_info "  To przestarzały klucz w /etc/containers/storage.conf lub containers.conf — kosmetyka, można usunąć"
     fi
 
     # Lista repozytoriów — tylko informacyjnie (standardowy przepływ tokenu Registry v2, bez proxy)
