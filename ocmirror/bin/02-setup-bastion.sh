@@ -111,14 +111,6 @@ log_info "Węzły klastra też muszą rozwiązywać $REG_FQDN i mieć dostęp do
 # ---------------------------------------------------------------------------
 log_section "3. Narzędzia oc, oc-mirror, opm (${CLIENT_CHANNEL})"
 
-download_verified() {   # download_verified <url_katalogu> <plik> <katalog_docelowy>
-    local base="$1" file="$2" dest="$3" sum
-    curl -fsSL -o "$dest/$file" "$base/$file"
-    sum=$(curl -fsSL "$base/sha256sum.txt" | awk -v f="$file" '$2==f {print $1}')
-    [[ -n "$sum" ]] || die "Brak sumy kontrolnej dla $file w $base/sha256sum.txt"
-    echo "$sum  $dest/$file" | sha256sum -c --quiet - || die "Niezgodna suma SHA256: $file"
-}
-
 TOOLS_DIR="$BASE_DIR/tools"
 if [[ $UPDATE_TOOLS -eq 1 ]] || ! command -v oc &>/dev/null; then
     download_verified "$CLIENTS_URL" "openshift-client-linux-${GOARCH}-rhel${RHEL_MAJOR}.tar.gz" "$TOOLS_DIR"

@@ -49,6 +49,7 @@ ocmirror/
 ├── bin/
 │   ├── 00-inspect-quay.sh        # inwentaryzacja istniejącego mini Quay (też z sudo) -> sekcja registry: (tylko odczyt)
 │   ├── 01-preflight.sh           # analiza klastra + graf aktualizacji Red Hat + szkic zmiennych (tylko odczyt)
+│   ├── 02a-reinstall-quay.sh     # (sudo) czysta reinstalacja mini Quay: usuwa starą, nowe hasło init, CA, auth.json
 │   ├── 02-setup-bastion.sh       # oc, oc-mirror, opm, mini Quay, CA, firewall, auth.json (idempotentny)
 │   ├── 03-generate-imageset.py   # mirror-vars.yaml -> ImageSetConfiguration (walidacja reguł oc-mirror)
 │   ├── 04-mirror.sh              # oc-mirror v2: m2d / d2m / m2m, logi, kopia cluster-resources
@@ -69,6 +70,10 @@ Wszystko uruchamiasz **na bastionie**, jako dedykowany użytkownik (np. `mirror`
 zalogowany do klastra (`oc login`) jako `cluster-admin`.
 
 ```bash
+# (mini Quay od zera / reinstalacja jako root — usuwa poprzednią instalację i jej obrazy)
+sudo bin/02a-reinstall-quay.sh -f config/mirror-vars.yaml -p ~/pull-secret.txt --plan   # podgląd
+sudo bin/02a-reinstall-quay.sh -f config/mirror-vars.yaml -p ~/pull-secret.txt
+
 # (jeśli mini Quay już działa na bastionie — np. uruchomiony przez sudo)
 bin/00-inspect-quay.sh --export-ca /data/oc-mirror/auth/quay-rootCA.pem
 #    -> gotowa sekcja registry: do mirror-vars.yaml

@@ -130,7 +130,44 @@ mkdir -p /data/quay /data/oc-mirror && chown -R mirror:mirror /data/quay /data/o
 Pobierz z <https://console.redhat.com/openshift/downloads> → *Tokens* → *Pull secret*
 i zapisz na bastionie jako `~/pull-secret.txt` (prawa `600`).
 
-### 4.4. Mini Quay już zainstalowany? Inwentaryzacja (skrypt 00)
+### 4.4. Czysta instalacja / reinstalacja mini Quay jako root (skrypt 02a)
+
+Gdy Quay ma działać jako root (`sudo podman`) albo trzeba zacząć od zera (np. nieznane hasło `init`),
+użyj `02a-reinstall-quay.sh`. **Usuwa poprzednią instalację razem z obrazami** (cache i archiwa
+oc-mirror w `mirror.baseDir` zostają — obrazy wrócą przez `bin/04-mirror.sh --step d2m`).
+
+```bash
+sudo bin/02a-reinstall-quay.sh -f config/mirror-vars.yaml -p ~/pull-secret.txt --plan   # tylko podgląd
+sudo bin/02a-reinstall-quay.sh -f config/mirror-vars.yaml -p ~/pull-secret.txt
+```
+
+| Krok | Co się dzieje |
+|---|---|
+| wymagania | DNS dla FQDN, sshd, pull secret, wolne miejsce, rozłączność katalogów Quay i oc-mirror |
+| wykrycie | kontenery `quay-app/redis/postgres`, pod `quay-pod`, usługi `quay-*.service`, wolumeny, katalogi (z punktów montowania), port |
+| potwierdzenie | trzeba **wpisać FQDN rejestru** (`--yes` pomija — tylko automatyzacja) |
+| kopia | `quay-config` i `quay-rootCA` starej instalacji → `/root/quay-backup-<data>.tgz` |
+| usunięcie | usługi, kontenery, pod, wolumeny, katalogi, stare CA z zaufanych; katalogi systemowe i `mirror.baseDir` są chronione |
+| instalacja | `mirror-registry install --targetHostname localhost --targetUsername root --quayHostname <host:port> --quayRoot ... --initUser init --initPassword <nowe>` |
+| hasło | losowe, 24 znaki, w `<katalog authFile>/quay-init-password` (0600, właściciel = użytkownik, który wywołał sudo); w logu zamaskowane |
+| CA | zaufanie systemowe (`update-ca-trust`), `/etc/containers/certs.d/<host:port>/ca.crt`, kopia `quay-rootCA.pem` czytelna bez sudo |
+| auth.json | **nowy**: pull secret Red Hat + `init@<host:port>`; stary plik → `auth.json.old-<data>` |
+| weryfikacja | `/health/instance` z weryfikacją TLS, logowanie do Quay, registry.redhat.io, quay.io, registry.connect.redhat.com, usługi systemd |
+
+Uwagi:
+
+- **SSH:** instalator mirror-registry zawsze łączy się przez SSH, także lokalnie (tu: `root@localhost`
+  kluczem `/root/.ssh/quay_installer`). Jeśli polityka banku ma `PermitRootLogin no`, dodaj
+  `--temp-ssh-root`: skrypt tymczasowo dopuszcza roota **tylko z 127.0.0.1/::1**, sprawdza (`sshd -T`),
+  że połączeń z zewnątrz to nie zmienia, i usuwa ustawienie po instalacji (także przy błędzie).
+- **Certyfikat z PKI banku:** `--ssl-cert plik.crt --ssl-key plik.key --ssl-ca łańcuch-ca.pem`.
+- **Proxy:** `sudo` czyści `https_proxy`. Jeśli bastion wychodzi przez proxy:
+  `sudo --preserve-env=https_proxy,no_proxy,HTTPS_PROXY,NO_PROXY bin/02a-reinstall-quay.sh ...`
+  (albo `--tarball` z wcześniej pobranym instalatorem).
+- Po reinstalacji: nowa organizacja i robot (rozdz. 4.7), a jeśli klaster był już skonfigurowany —
+  `05-configure-cluster.sh --stage trust,pullsecret` (nowe CA i nowy token robota).
+
+### 4.5. Mini Quay już zainstalowany? Inwentaryzacja (skrypt 00)
 
 Jeśli mini Quay działa już na bastionie (np. zainstalowany i uruchamiany przez `sudo podman`),
 nie instaluj go ponownie. Odczytaj jego ustawienia:
@@ -160,7 +197,7 @@ Dodatkowo: stan kontenerów i usług systemd, SAN i termin ważności certyfikat
 > Pozostałe skrypty uruchamiaj jak dotąd, jako `mirror`. `02-setup-bastion.sh` wykryje działający
 > Quay i pominie instalację.
 
-### 4.5. Instalacja (skrypt 02)
+### 4.6. Narzędzia i instalacja rootless (skrypt 02)
 
 Najpierw skopiuj przykładowe zmienne i uzupełnij sekcje `registry`, `mirror`, `tools`
 (resztę uzupełni preflight w fazie B):
@@ -186,7 +223,7 @@ Co robi skrypt (każdy krok jest pomijany, jeśli już wykonany):
 > W banku zwykle wymagany jest certyfikat z wewnętrznego PKI — wymień go zgodnie z rozdz. 12.3
 > i wskaż łańcuch CA w `registry.caFile`.
 
-### 4.6. Organizacja i konto robota (ręcznie, w przeglądarce) — PRZED pierwszym mirrorem
+### 4.7. Organizacja i konto robota (ręcznie, w przeglądarce) — PRZED pierwszym mirrorem
 
 Klaster **nie może** używać konta `init` — ma ono prawo zapisu (ostrzeżenie w dokumentacji,
 rozdz. 5.3.2). Tworzymy konto robota tylko do odczytu:
@@ -720,7 +757,7 @@ przez garbage collection w tle (z opóźnieniem).
 |---|---|---|
 | `x509: certificate signed by unknown authority` (bastion) | CA mini Quay nie jest zaufane | `02-setup-bastion.sh` (krok 5) lub ręcznie `update-ca-trust` |
 | `x509` na węzłach / pody `ErrImagePull` z mirrora | brak CA w `additionalTrustedCA` lub zły klucz | etap `trust`; klucz musi mieć postać `fqdn..8443` |
-| `unauthorized` przy pobieraniu z mirrora | brak/zły token w pull secret, robot bez *Read* | etap `pullsecret`; uprawnienia robota (rozdz. 4.6) |
+| `unauthorized` przy pobieraniu z mirrora | brak/zły token w pull secret, robot bez *Read* | etap `pullsecret`; uprawnienia robota (rozdz. 4.7) |
 | `pasta failed ... External interface not usable` | Podman 5 bez domyślnej trasy | rozdz. 4.1 (slirp4netns) |
 | oc-mirror: `too many open files` | niski `ulimit -n` | skrypt podnosi limit; ew. `/etc/security/limits.d/` |
 | oc-mirror: `multiple channel heads` | `maxVersion` odcina głowę kanału | usuń `maxVersion` / obniż `minVersion` (rozdz. 5.13) |

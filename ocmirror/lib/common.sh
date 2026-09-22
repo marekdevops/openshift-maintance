@@ -99,4 +99,14 @@ in_no_proxy() {
     return 1
 }
 
+# download_verified <url_katalogu> <plik> <katalog_docelowy>
+# Pobiera plik i weryfikuje go sumą z <url_katalogu>/sha256sum.txt (mirror.openshift.com).
+download_verified() {
+    local base="$1" file="$2" dest="$3" sum
+    curl -fsSL -o "$dest/$file" "$base/$file"
+    sum=$(curl -fsSL "$base/sha256sum.txt" | awk -v f="$file" '$2==f {print $1}')
+    [[ -n "$sum" ]] || die "Brak sumy kontrolnej dla $file w $base/sha256sum.txt"
+    echo "$sum  $dest/$file" | sha256sum -c --quiet - || die "Niezgodna suma SHA256: $file"
+}
+
 timestamp() { date '+%Y%m%d-%H%M%S'; }
