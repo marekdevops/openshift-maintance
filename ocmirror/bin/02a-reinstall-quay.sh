@@ -48,6 +48,7 @@ SSL_CA=""
 TEMP_SSH_ROOT=0
 ASSUME_YES=0
 FINISH_ONLY=0
+INIT_USER=init
 
 usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
@@ -395,7 +396,7 @@ fi
 
 INSTALL_ARGS=(install -v --targetHostname localhost --targetUsername root
               --quayHostname "$REG_HOST" --quayRoot "$QUAY_ROOT"
-              --initUser init --initPassword "$PASSWORD")
+              --initUser "$INIT_USER" --initPassword "$PASSWORD")
 [[ -n "$QUAY_STORAGE" ]] && INSTALL_ARGS+=(--quayStorage "$QUAY_STORAGE")
 [[ -n "$SQLITE_STORAGE" ]] && INSTALL_ARGS+=(--sqliteStorage "$SQLITE_STORAGE")
 [[ -n "$SSL_CERT" ]] && INSTALL_ARGS+=(--sslCert "$(readlink -f "$SSL_CERT")" --sslKey "$(readlink -f "$SSL_KEY")")
@@ -477,11 +478,24 @@ fi
 # ---------------------------------------------------------------------------
 log_section "8. Poświadczenia ($AUTH_FILE)"
 
-[[ -e "$AUTH_FILE" ]] && mv "$AUTH_FILE" "${AUTH_FILE}.old-$(timestamp)" && log_info "Poprzedni plik przeniesiony do ${AUTH_FILE}.old-*"
+# Najpierw Quay musi odpowiadać — bez tego nie sprawdzimy konta ani go nie założymy
+end=$((SECONDS + 180))
+until curl -fsS --noproxy "$REG_FQDN" --cacert "$CA_EXPORT" -o /dev/null "https://${REG_HOST}/health/instance" 2>/dev/null; do
+    (( SECONDS < end )) || die "Quay nie odpowiada na https://${REG_HOST}/health/instance po 3 min"
+    sleep 5
+done
+log_ok "https://${REG_HOST}/health/instance — OK (TLS zweryfikowany)"
 
-# Konto do auth.json bierzemy z WYGENEROWANEGO config.yaml (SUPER_USERS), a nie z --initUser:
-# niektóre wersje mirror-registry zakładają konto o innej nazwie niż przekazana w opcji.
-QUAY_USER=$(python3 - "$QUAY_ROOT/quay-config/config.yaml" <<'PY'
+LOGIN_TOOL=podman; command -v skopeo &>/dev/null && LOGIN_TOOL=skopeo
+
+# probe_login <użytkownik> <hasło> — sprawdza dane w rejestrze, nie dotykając $AUTH_FILE
+probe_login() {
+    "$LOGIN_TOOL" login --authfile "$TMP_DIR/probe.json" -u "$1" -p "$2" "$REG_HOST" &>/dev/null
+}
+
+# Nazwa konta bywa różna od --initUser: niektóre wersje mirror-registry zakładają
+# konto o nazwie z SUPER_USERS w wygenerowanym config.yaml. Sprawdzamy oba w rejestrze.
+SU_FIRST=$(python3 - "$QUAY_ROOT/quay-config/config.yaml" <<'PY'
 import sys, yaml
 try:
     with open(sys.argv[1]) as f:
@@ -493,28 +507,52 @@ if isinstance(su, list) and su:
     print(su[0])
 PY
 )
+[[ -n "$SU_FIRST" && "$SU_FIRST" != "$INIT_USER" ]] \
+    && log_info "SUPER_USERS w config.yaml: $SU_FIRST (a --initUser to $INIT_USER) — sprawdzę oba"
+
+QUAY_USER=""
+for u in "$INIT_USER" "$SU_FIRST"; do
+    [[ -n "$u" ]] || continue
+    if probe_login "$u" "$PASSWORD"; then QUAY_USER="$u"; log_ok "Konto '$u' działa z zapisanym hasłem"; break; fi
+    log_info "Konto '$u' nie przyjmuje zapisanego hasła"
+done
+
+# Żadne nie działa => instalator nie zdążył założyć konta. Zakładamy je tym samym
+# mechanizmem, którego używa mirror-registry: POST /api/v1/user/initialize
+# (działa wyłącznie, gdy baza Quay nie ma jeszcze żadnego użytkownika).
 if [[ -z "$QUAY_USER" ]]; then
-    QUAY_USER=init
-    log_warn "W config.yaml nie ma SUPER_USERS — zakładam konto 'init'"
-elif [[ "$QUAY_USER" != "init" ]]; then
-    log_warn "Instalator założył konto '$QUAY_USER' (SUPER_USERS), a nie 'init' — auth.json dostanie '$QUAY_USER'"
+    log_info "Zakładam konto '$INIT_USER' przez API bootstrapu Quay (/api/v1/user/initialize)"
+    INIT_BODY=$(jq -n --arg u "$INIT_USER" --arg p "$PASSWORD" --arg e "${INIT_USER}@${REG_FQDN}" \
+        '{username: $u, password: $p, email: $e, access_token: true}')
+    HTTP_CODE=$(curl -s --noproxy "$REG_FQDN" --cacert "$CA_EXPORT" \
+        -o "$TMP_DIR/init.json" -w '%{http_code}' \
+        -X POST -H 'Content-Type: application/json' -d "$INIT_BODY" \
+        "https://${REG_HOST}/api/v1/user/initialize" 2>/dev/null) || HTTP_CODE=000
+    INIT_MSG=$(jq -r '.message // .error_message // empty' "$TMP_DIR/init.json" 2>/dev/null || true)
+    if [[ "$HTTP_CODE" == "200" ]] && probe_login "$INIT_USER" "$PASSWORD"; then
+        QUAY_USER="$INIT_USER"
+        log_ok "Konto '$INIT_USER' założone i zweryfikowane (hasło: $PASS_FILE)"
+    elif grep -qi 'non-empty database' <<<"$INIT_MSG"; then
+        log_error "W Quay istnieje już konto, którego hasła nie znam (API bootstrapu odmawia: $INIT_MSG)"
+        log_info "  Hasło konta '$SU_FIRST' pochodzi z wcześniejszej instalacji. Opcje:"
+        log_info "    1. zmień hasło w UI: https://${REG_HOST} (zakładanie/zmiana konta)"
+        log_info "    2. albo zainstaluj Quay od zera: $0 -f $VARS_FILE -p $PULL_SECRET   (kasuje obrazy)"
+    else
+        log_error "Nie udało się założyć konta '$INIT_USER': HTTP $HTTP_CODE ${INIT_MSG:+($INIT_MSG)}"
+        [[ "$HTTP_CODE" == "404" || "$HTTP_CODE" == "501" ]] \
+            && log_info "  W config.yaml brakuje FEATURE_USER_INITIALIZE: true — konto załóż w UI: https://${REG_HOST}"
+    fi
 fi
 
+[[ -n "$QUAY_USER" ]] || QUAY_USER="$INIT_USER"   # zapisujemy, co mamy; błąd jest już zgłoszony
+
+[[ -e "$AUTH_FILE" ]] && mv "$AUTH_FILE" "${AUTH_FILE}.old-$(timestamp)" && log_info "Poprzedni plik przeniesiony do ${AUTH_FILE}.old-*"
 jq --arg r "$REG_HOST" --arg a "$(printf '%s:%s' "$QUAY_USER" "$PASSWORD" | base64 -w0)" \
     '.auths[$r] = {auth: $a}' "$PULL_SECRET" >"$TMP_DIR/auth.json"
 install -m 0600 -o "$OWNER" -g "$OWNER_GROUP" "$TMP_DIR/auth.json" "$AUTH_FILE"
 log_ok "Utworzono: pull secret Red Hat + ${QUAY_USER}@${REG_HOST} (0600, $OWNER)"
 
-# Czekamy, aż Quay po instalacji odpowie
-end=$((SECONDS + 180))
-until curl -fsS --noproxy "$REG_FQDN" --cacert "$CA_EXPORT" -o /dev/null "https://${REG_HOST}/health/instance" 2>/dev/null; do
-    (( SECONDS < end )) || die "Quay nie odpowiada na https://${REG_HOST}/health/instance po 3 min"
-    sleep 5
-done
-log_ok "https://${REG_HOST}/health/instance — OK (TLS zweryfikowany)"
-
 # Logowanie sprawdzane tak, jak zrobi to oc-mirror: istniejące dane z pliku, bez podawania hasła
-LOGIN_TOOL=podman; command -v skopeo &>/dev/null && LOGIN_TOOL=skopeo
 check_login() {
     local reg="$1" out
     if out=$("$LOGIN_TOOL" login --authfile "$AUTH_FILE" "$reg" </dev/null 2>&1); then
@@ -558,8 +596,41 @@ registry:
   sqliteStorage: "${SQLITE_STORAGE}"
   caFile: ${CA_EXPORT}
 EOF
-[[ "$(expand_path "$VARS_CA")" == "$CA_EXPORT" ]] \
-    || log_warn "W $VARS_FILE registry.caFile = '${VARS_CA}' — zmień na ${CA_EXPORT} (czytelne bez sudo)"
+# registry.caFile musi wskazywać kopię czytelną bez sudo — poprawiamy od razu w pliku
+# zmiennych, zamiast zostawiać to użytkownikowi. Oryginał ląduje obok, z datą.
+if [[ "$(expand_path "$VARS_CA")" != "$CA_EXPORT" ]]; then
+    if VARS_BAK=$(python3 - "$VARS_FILE" "$CA_EXPORT" <<'PY'
+import re, shutil, sys, time
+path, ca = sys.argv[1], sys.argv[2]
+src = open(path).read()
+# Blok "registry:" = nagłówek plus kolejne linie wcięte lub puste. Bez re.DOTALL,
+# inaczej ".*" połyka resztę pliku i wpis trafia w złe miejsce.
+m = re.search(r'(?m)^registry:[ \t]*\n(?:[ \t].*\n|[ \t]*\n)*', src)
+if not m:
+    sys.exit(1)
+block = m.group(0)
+new_block, n = re.subn(r'(?m)^([ \t]+caFile:[ \t]*).*$', lambda mm: mm.group(1) + ca, block, count=1)
+if n == 0:
+    # brak klucza — dokładamy go po ostatniej wciętej linii bloku, przed pustymi
+    lines = block.splitlines(keepends=True)
+    last = max((i for i, l in enumerate(lines) if l[:1] in (" ", "\t") and l.strip()), default=-1)
+    if last < 0:
+        sys.exit(1)
+    indent = re.match(r'[ \t]*', lines[last]).group(0)
+    lines.insert(last + 1, "%scaFile: %s\n" % (indent, ca))
+    new_block = "".join(lines)
+bak = path + ".bak-" + time.strftime("%Y%m%d-%H%M%S")
+shutil.copy2(path, bak)
+open(path, "w").write(src[:m.start()] + new_block + src[m.end():])
+print(bak)
+PY
+    ); then
+        chown "$OWNER:$OWNER_GROUP" "$VARS_FILE" "$VARS_BAK" 2>/dev/null || true
+        log_ok "W $VARS_FILE ustawiono registry.caFile = $CA_EXPORT (kopia: $VARS_BAK)"
+    else
+        log_warn "Nie umiem poprawić $VARS_FILE — ustaw ręcznie registry.caFile = ${CA_EXPORT}"
+    fi
+fi
 
 log_header "GOTOWE — ostrzeżenia: ${WARNINGS}, błędy: ${ERRORS}"
 cat <<EOF

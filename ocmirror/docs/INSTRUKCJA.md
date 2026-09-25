@@ -151,7 +151,9 @@ sudo bin/02a-reinstall-quay.sh -f config/mirror-vars.yaml -p ~/pull-secret.txt
 | instalacja | `mirror-registry install --targetHostname localhost --targetUsername root --quayHostname <host:port> --quayRoot ... --initUser init --initPassword <nowe>` |
 | hasło | losowe, 24 znaki, w `<katalog authFile>/quay-init-password` (0600, właściciel = użytkownik, który wywołał sudo); w logu zamaskowane |
 | CA | zaufanie systemowe (`update-ca-trust`), `/etc/containers/certs.d/<host:port>/ca.crt`, kopia `quay-rootCA.pem` czytelna bez sudo |
-| auth.json | **nowy**: pull secret Red Hat + `init@<host:port>`; stary plik → `auth.json.old-<data>` |
+| konto w Quay | sprawdza w rejestrze konto `init` **oraz** nazwę z `SUPER_USERS` w wygenerowanym `config.yaml` (bywa inna niż `--initUser`); gdy żadne nie przyjmuje zapisanego hasła, a baza Quay jest pusta — zakłada `init` przez `POST /api/v1/user/initialize` (ten sam mechanizm, co instalator) |
+| auth.json | **nowy**: pull secret Red Hat + konto, które faktycznie działa `@<host:port>`; stary plik → `auth.json.old-<data>` |
+| mirror-vars.yaml | `registry.caFile` ustawiany na kopię CA czytelną bez sudo (kopia pliku zmiennych obok, z datą) |
 | weryfikacja | `/health/instance` z weryfikacją TLS, logowanie do Quay, registry.redhat.io, quay.io, registry.connect.redhat.com, usługi systemd |
 
 Uwagi:
@@ -164,6 +166,14 @@ Uwagi:
 - **Proxy:** `sudo` czyści `https_proxy`. Jeśli bastion wychodzi przez proxy:
   `sudo --preserve-env=https_proxy,no_proxy,HTTPS_PROXY,NO_PROXY bin/02a-reinstall-quay.sh ...`
   (albo `--tarball` z wcześniej pobranym instalatorem).
+- **Konto w Quay:** skrypt nie zakłada, że nazywa się `init`. Niektóre wersje `mirror-registry`
+  tworzą konto o nazwie z `SUPER_USERS` (np. `admin`) mimo przekazanego `--initUser init`,
+  a gdy instalacja przerwie się przed tym krokiem — konta nie ma wcale. Krok 8 sprawdza więc
+  oba warianty realnym logowaniem, a przy pustej bazie zakłada konto sam. Nic nie trzeba
+  poprawiać ręcznie po skrypcie.
+- Jeśli konto istnieje, ale z hasłem z wcześniejszej instalacji, API bootstrapu odmawia
+  (`Cannot initialize user in a non-empty database`) — wtedy zostaje zmiana hasła w UI Quay
+  albo instalacja od zera.
 - Po reinstalacji: nowa organizacja i robot (rozdz. 4.7), a jeśli klaster był już skonfigurowany —
   `05-configure-cluster.sh --stage trust,pullsecret` (nowe CA i nowy token robota).
 
