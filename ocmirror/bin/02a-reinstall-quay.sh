@@ -478,10 +478,32 @@ fi
 log_section "8. Poświadczenia ($AUTH_FILE)"
 
 [[ -e "$AUTH_FILE" ]] && mv "$AUTH_FILE" "${AUTH_FILE}.old-$(timestamp)" && log_info "Poprzedni plik przeniesiony do ${AUTH_FILE}.old-*"
-jq --arg r "$REG_HOST" --arg a "$(printf 'init:%s' "$PASSWORD" | base64 -w0)" \
+
+# Konto do auth.json bierzemy z WYGENEROWANEGO config.yaml (SUPER_USERS), a nie z --initUser:
+# niektóre wersje mirror-registry zakładają konto o innej nazwie niż przekazana w opcji.
+QUAY_USER=$(python3 - "$QUAY_ROOT/quay-config/config.yaml" <<'PY'
+import sys, yaml
+try:
+    with open(sys.argv[1]) as f:
+        cfg = yaml.safe_load(f) or {}
+except Exception:
+    sys.exit(0)
+su = cfg.get("SUPER_USERS") or []
+if isinstance(su, list) and su:
+    print(su[0])
+PY
+)
+if [[ -z "$QUAY_USER" ]]; then
+    QUAY_USER=init
+    log_warn "W config.yaml nie ma SUPER_USERS — zakładam konto 'init'"
+elif [[ "$QUAY_USER" != "init" ]]; then
+    log_warn "Instalator założył konto '$QUAY_USER' (SUPER_USERS), a nie 'init' — auth.json dostanie '$QUAY_USER'"
+fi
+
+jq --arg r "$REG_HOST" --arg a "$(printf '%s:%s' "$QUAY_USER" "$PASSWORD" | base64 -w0)" \
     '.auths[$r] = {auth: $a}' "$PULL_SECRET" >"$TMP_DIR/auth.json"
 install -m 0600 -o "$OWNER" -g "$OWNER_GROUP" "$TMP_DIR/auth.json" "$AUTH_FILE"
-log_ok "Utworzono: pull secret Red Hat + init@${REG_HOST} (0600, $OWNER)"
+log_ok "Utworzono: pull secret Red Hat + ${QUAY_USER}@${REG_HOST} (0600, $OWNER)"
 
 # Czekamy, aż Quay po instalacji odpowie
 end=$((SECONDS + 180))
@@ -541,7 +563,7 @@ EOF
 
 log_header "GOTOWE — ostrzeżenia: ${WARNINGS}, błędy: ${ERRORS}"
 cat <<EOF
-  UI Quay        : https://${REG_HOST}   (użytkownik: init, hasło: ${PASS_FILE})
+  UI Quay        : https://${REG_HOST}   (użytkownik: ${QUAY_USER}, hasło: ${PASS_FILE})
   Poświadczenia  : ${AUTH_FILE}
   CA rejestru    : ${CA_EXPORT}
 
