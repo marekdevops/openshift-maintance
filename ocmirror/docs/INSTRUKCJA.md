@@ -189,16 +189,19 @@ albo `config.yaml` został z poprzedniej instalacji, albo kontener Redis przetrw
 ```bash
 sudo bin/02b-fix-quay-redis.sh -f config/mirror-vars.yaml --plan   # sama diagnoza, nic nie zmienia
 sudo bin/02b-fix-quay-redis.sh -f config/mirror-vars.yaml          # diagnoza + naprawa
+sudo bin/02b-fix-quay-redis.sh -f config/mirror-vars.yaml --dump   # surowe dowody do analizy
 ```
 
 | Krok | Co się dzieje |
 |---|---|
 | konfiguracja | `config.yaml` z montowania `quay-app`, z unitu `quay-app.service` (działa też, gdy kontener jest w pętli restartów), z `registry.quayRoot` lub z typowych lokalizacji |
-| kandydaci | hasła z `config.yaml`, z kontenera `quay-redis` (`REDIS_PASSWORD`, `--requirepass`) i z `quay-redis.service` |
+| kandydaci — kontener | `REDIS_PASSWORD`, `--requirepass` w argumentach `podman run` / `Cmd` / `Entrypoint`, `--requirepass` w wierszu poleceń działających procesów, `requirepass` w plikach `redis.conf` widocznych w kontenerze |
+| kandydaci — host | `quay-redis.service`: `-e`/`--env REDIS_PASSWORD=`, `Environment=`, `--requirepass`, `--env-file`; pliki `*.conf` podmontowane do kontenera (bind mount) |
 | test | realne `AUTH` do Redis (`redis-cli PING`) dla każdego kandydata — w logu tylko skrót `sha256`, nie hasło |
 | naprawa A | działa hasło Redis inne niż w `config.yaml` → wpis do `config.yaml` (obie sekcje) + restart `quay-app` |
-| naprawa B | nie działa żadne (albo Redis bez hasła) → **nowe** hasło w `config.yaml` **i** w usłudze `quay-redis` (`--reset`), restart Redis i Quay |
-| weryfikacja | `quay-app` wstaje i utrzymuje się, w logach nie ma już `WRONGPASS` |
+| naprawa B | nie działa żadne (albo Redis bez hasła) → **nowe** hasło: w `config.yaml` i tam, gdzie Redis je czyta (unit, `--env-file` albo podmontowany `redis.conf`) |
+| naprawa C | hasła nie ma nigdzie na hoście → skrypt **odtwarza sam kontener `quay-redis`** z jego własnych parametrów (`CreateCommand`) plus `REDIS_PASSWORD`; pod, wolumeny i reszta instalacji zostają |
+| weryfikacja | Redis przyjmuje nowe hasło (`PONG`) **zanim** ruszy `quay-app`; potem `quay-app` wstaje, utrzymuje się 30 s i w logach nie ma `WRONGPASS` |
 
 Uwagi:
 
@@ -207,7 +210,13 @@ Uwagi:
 - Poprzedni `config.yaml` trafia do `config.yaml.bak-<data>`. Plik jest przepisywany
   parserem YAML: wartości te same, komentarze i formatowanie mogą się zmienić.
 - `--show-secrets` wypisuje hasła jawnie (domyślnie tylko `sha256:` i długość).
-- Jeśli hasła nie ma ani w unicie, ani w pliku `--env-file`, zostaje czysta reinstalacja (4.4).
+- `--dump` wypisuje surowe dowody (zmienne i argumenty kontenera, punkty montowania, wiersze
+  poleceń procesów, `ExecStart` z unitu, linie `requirepass`/`include`/`aclfile` z `redis.conf`).
+  Hasła są maskowane do `sha256:`, chyba że dodasz `--show-secrets`. `--plan` dokłada ten sam
+  zrzut, gdy wykryje problem — to materiał do analizy, jeśli naprawa nie zadziała.
+- Po naprawie C kontener Redis jest odtworzony poza systemd. Skrypt o tym ostrzega —
+  jeśli `quay-redis.service` nie startuje go poprawnie po restarcie bastionu, zostaje
+  czysta reinstalacja (4.4).
 
 ### 4.5. Mini Quay już zainstalowany? Inwentaryzacja (skrypt 00)
 
