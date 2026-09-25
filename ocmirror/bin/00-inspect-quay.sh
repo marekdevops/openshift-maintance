@@ -168,7 +168,9 @@ if [[ "$REG_HOST" == *:* ]]; then REG_PORT="${REG_HOST##*:}"; else REG_PORT=443;
 
 log_ok "SERVER_HOSTNAME        : $(jq -r .SERVER_HOSTNAME "$TMP_DIR/cfg.json")  -> registry.host"
 log_info "Baza danych            : $(jq -r .DB "$TMP_DIR/cfg.json")"
-log_info "Superużytkownicy       : $(jq -r '(.SUPER_USERS // []) | join(", ")' "$TMP_DIR/cfg.json")"
+SUPERUSERS=$(jq -r '(.SUPER_USERS // []) | join(", ")' "$TMP_DIR/cfg.json")
+SUPERUSER_FIRST=$(jq -r '(.SUPER_USERS // []) | first // ""' "$TMP_DIR/cfg.json")
+log_info "Superużytkownicy       : ${SUPERUSERS:-<brak>}"
 if [[ "$(jq -r .CREATE_NAMESPACE_ON_PUSH "$TMP_DIR/cfg.json")" == "true" ]]; then
     log_ok "CREATE_NAMESPACE_ON_PUSH: true (organizacja powstanie przy pierwszym push oc-mirror)"
 else
@@ -297,6 +299,7 @@ if [[ -n "$AUTH_ARG" ]]; then
     fi
     AUTH_CANDIDATES+=("$AUTH_ARG")
 else
+    [[ -n "$VARS_FILE" ]] || log_info "Bez -f nie znam mirror.authFile — sprawdzam tylko domyślne lokalizacje poświadczeń"
     [[ -n "$VARS_FILE" ]] && AUTH_CANDIDATES+=("$(expand_path "$(cfg mirror.authFile "")")")
     AUTH_CANDIDATES+=("${REGISTRY_AUTH_FILE:-}" "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/containers/auth.json" "$HOME/.docker/config.json")
 fi
@@ -352,6 +355,16 @@ else
         else
             log_error "$LOGIN_TOOL login do $REG_HOST nie powiódł się: ${USER_ERR:-$(tr '\n' ' ' <"$TMP_DIR/login.err")}"
             log_info "  Jeśli to złe hasło: $LOGIN_TOOL login --authfile $AUTH_FILE -u ${LOGIN_USER:-init} $REG_HOST"
+            # Najczęstsza pułapka: w auth.json siedzi konto z POPRZEDNIEJ instalacji Quay
+            if [[ -n "$SUPERUSER_FIRST" && "$SUPERUSER_FIRST" != "$LOGIN_USER" ]]; then
+                log_error "Konto w poświadczeniach ('${LOGIN_USER:-?}') NIE jest superużytkownikiem tego Quay ('$SUPERUSERS')"
+                log_info "  To wpis z poprzedniej instalacji. Zaloguj się jako '$SUPERUSER_FIRST':"
+                log_info "    $LOGIN_TOOL login --authfile $AUTH_FILE -u $SUPERUSER_FIRST $REG_HOST"
+            fi
+            PASS_HINT="$(dirname "$AUTH_FILE")/quay-init-password"
+            [[ -r "$PASS_HINT" ]] \
+                && log_info "  Hasło zapisane przez 02a-reinstall-quay.sh: $PASS_HINT" \
+                || log_info "  Hasła nie znam — jeśli nie ma go w <katalog authFile>/quay-init-password, zostaje reinstalacja (INSTRUKCJA 4.4)"
         fi
     fi
     if [[ -s "$TMP_DIR/login.warn" ]]; then
