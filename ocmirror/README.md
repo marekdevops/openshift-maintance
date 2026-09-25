@@ -53,11 +53,12 @@ ocmirror/
 │   ├── 02b-fix-quay-redis.sh     # (sudo) diagnoza i naprawa błędu Quay "WRONGPASS" / "Could not connect to Redis"
 │   ├── 02-setup-bastion.sh       # oc, oc-mirror, opm, mini Quay, CA, firewall, auth.json (idempotentny)
 │   ├── 03-generate-imageset.py   # mirror-vars.yaml -> ImageSetConfiguration (walidacja reguł oc-mirror)
-│   ├── 04-mirror.sh              # oc-mirror v2: m2d / d2m / m2m, logi, kopia cluster-resources
+│   ├── 04-mirror.sh              # oc-mirror v2: m2d / d2m / m2m, logi, kopia cluster-resources (--estimate: ile to zajmie)
 │   └── 05-configure-cluster.sh   # etapy: trust, pullsecret, mirrors, catalogs, verify, osus, disconnect
 ├── lib/
 │   ├── common.sh                 # logowanie, walidacja, odczyt zmiennych
 │   ├── ocp_graph.py              # klient grafu aktualizacji (api.openshift.com lub lokalny OSUS)
+│   ├── estimate_size.py          # rozmiar mirrora z mapping.txt (manifesty, warstwy liczone raz)
 │   ├── yamlq.py / yaml2json.py   # odczyt YAML bez zewnętrznych narzędzi (yq)
 ├── config/
 │   └── mirror-vars.example.yaml  # JEDYNE źródło prawdy: wersje, operatory, rejestr — z opisem pól

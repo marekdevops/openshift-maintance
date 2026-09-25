@@ -13,6 +13,8 @@
 #                 m2m  — mirror-to-mirror: internet -> mini Quay bez archiwum
 #                 all  — domyślnie: m2d + d2m (albo m2m, gdy mirror.workflow=m2m)
 #   --dry-run     tylko lista obrazów do zmirrorowania (mapping.txt / missing.txt), bez kopiowania
+#   --estimate    jak --dry-run, a na koniec oszacowanie rozmiaru: odpytuje rejestry o same
+#                 manifesty (bez pobierania warstw) i sumuje warstwy, licząc każdą raz
 #
 # Struktura katalogów (mirror.baseDir):
 #   cache/                 cache oc-mirror — RÓB KOPIĘ po każdym udanym mirrorze
@@ -31,6 +33,7 @@ VARS_FILE=""
 ISC=""
 STEP="all"
 DRY_RUN=0
+ESTIMATE=0
 
 usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
@@ -40,6 +43,7 @@ while [[ $# -gt 0 ]]; do
         -c) ISC="$2"; shift 2 ;;
         --step) STEP="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
+        --estimate) DRY_RUN=1; ESTIMATE=1; shift ;;
         -h|--help) usage 0 ;;
         *) echo "Nieznana opcja: $1"; usage 1 ;;
     esac
@@ -169,14 +173,28 @@ check_mirror_errors() {   # check_mirror_errors <working-dir>
 
 RUN_MARKER="$LOG_DIR/.step-start"
 
+# estimate_size <mapping.txt> — ile to zajmie; tylko przy --estimate, bo odpytuje rejestry
+estimate_size() {
+    (( ESTIMATE )) || return 0
+    local mapping="$1"
+    [[ -s "$mapping" ]] || { log_warn "Brak $mapping — nie ma z czego liczyć rozmiaru"; return 0; }
+    command -v skopeo &>/dev/null || { log_warn "Brak skopeo — oszacowanie rozmiaru pominięte (sudo dnf install -y skopeo)"; return 0; }
+    log_section "Oszacowanie rozmiaru"
+    python3 "$LIB_DIR/estimate_size.py" --mapping "$mapping" \
+        --authfile "$AUTH_FILE" --arch "$(cfg cluster.architecture amd64)" \
+        || log_warn "Oszacowanie rozmiaru nie powiodło się (mirror to nie blokuje)"
+}
+
 for step in "${STEPS[@]}"; do
     case "$step" in
         m2d)
             run_oc_mirror m2d --cache-dir "$CACHE_DIR" "file://$ARCHIVE_DIR"
             check_mirror_errors "$ARCHIVE_DIR/working-dir"
             if (( DRY_RUN )); then
-                log_info "Lista obrazów: $ARCHIVE_DIR/working-dir/dry-run/mapping.txt ($(wc -l <"$ARCHIVE_DIR/working-dir/dry-run/mapping.txt" 2>/dev/null || echo 0))"
+                MAPPING="$ARCHIVE_DIR/working-dir/dry-run/mapping.txt"
+                log_info "Lista obrazów: $MAPPING ($(wc -l <"$MAPPING" 2>/dev/null || echo 0))"
                 log_info "Brak w cache : $ARCHIVE_DIR/working-dir/dry-run/missing.txt"
+                estimate_size "$MAPPING"
             else
                 log_info "Archiwa: $(ls -1 "$ARCHIVE_DIR"/mirror_*.tar 2>/dev/null | wc -l) plik(ów), $(du -sh "$ARCHIVE_DIR" | cut -f1)"
             fi

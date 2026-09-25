@@ -483,6 +483,38 @@ Sprawdza konfigurację i wypisuje listę obrazów bez kopiowania:
 `/data/oc-mirror/archive/working-dir/dry-run/mapping.txt` (wszystkie obrazy)
 i `missing.txt` (brakujące w cache). Błędy typu „channel not found” wychodzą właśnie tutaj.
 
+### 7.1a. Ile to zajmie — oszacowanie rozmiaru
+
+Sam dry-run podaje tylko **liczbę** obrazów. Żeby poznać rozmiar przed ściąganiem:
+
+```bash
+bin/04-mirror.sh -f config/mirror-vars.yaml --estimate
+```
+
+`--estimate` robi to samo co `--dry-run`, a potem odpytuje rejestry o **same manifesty**
+(bez pobierania warstw) i sumuje rozmiary warstw, **licząc każdą warstwę tylko raz**.
+To istotne: obrazy Red Hata dzielą warstwy bazowe, więc suma „po obrazach” zawyża wynik
+nawet kilkukrotnie. Wynik to rozmiar skompresowany — tyle pójdzie przez sieć i tyle
+zajmą archiwa `.tar`; w Quay dane zajmą zwykle 1,0–1,6x tyle.
+
+```
+  Obrazy odpytane   : 1247/1247
+  Unikalne warstwy  : 9863
+  DO POBRANIA       : 412.7 GiB  (skompresowane — tyle pójdzie przez sieć i do archiwów)
+  W rejestrze Quay  : ok. 412.7 GiB - 660.3 GiB (zależnie od kompresji)
+  Czas pobierania   : 100 Mb/s ≈ 9.9 h,  250 Mb/s ≈ 3.9 h,  500 Mb/s ≈ 2.0 h,  1000 Mb/s ≈ 1.0 h
+```
+
+Uwagi:
+
+- wymaga `skopeo` i ważnych poświadczeń w `mirror.authFile` (bez nich rejestry nie
+  pokażą manifestów); obrazy, których nie da się odpytać, są wypisane osobno i **nie**
+  wchodzą do sumy — traktuj wynik jako dolną granicę,
+- dla kilku tysięcy obrazów zapytania trwają kilka minut (12 równolegle, `--jobs`
+  w `lib/estimate_size.py`), ale nie pobierają żadnych danych,
+- architektura brana jest z `cluster.architecture` — z list manifestów liczony jest
+  tylko ten jeden wariant, nie wszystkie.
+
 ### 7.2. Mirror właściwy
 
 ```bash
