@@ -387,6 +387,13 @@ INSTALL_LOG="$LOG_DIR/mirror-registry-install-$(timestamp).log"
 log_info "Instalacja trwa kilka minut. Log (hasło zamaskowane): $INSTALL_LOG"
 if ! (cd "$MR_DIR" && ./mirror-registry "${INSTALL_ARGS[@]}") 2>&1 \
         | sed -u "s/${PASSWORD}/********/g" | tee "$INSTALL_LOG"; then
+    if grep -qi 'WRONGPASS\|Could not connect to Redis' "$INSTALL_LOG"; then
+        die "Instalacja mirror-registry nie powiodła się: Quay nie łączy się z Redis (WRONGPASS).
+       Hasło w quay-config/config.yaml jest inne niż to, z którym wystartował kontener quay-redis.
+       Nie trzeba instalować od nowa — zdiagnozuj i napraw:
+         sudo $(dirname "$(readlink -f "$0")")/02b-fix-quay-redis.sh -f $VARS_FILE --plan
+       Szczegóły instalacji: $INSTALL_LOG"
+    fi
     die "Instalacja mirror-registry nie powiodła się — szczegóły w $INSTALL_LOG"
 fi
 chown "$OWNER:$OWNER_GROUP" "$INSTALL_LOG"

@@ -167,6 +167,48 @@ Uwagi:
 - Po reinstalacji: nowa organizacja i robot (rozdz. 4.7), a jeśli klaster był już skonfigurowany —
   `05-configure-cluster.sh --stage trust,pullsecret` (nowe CA i nowy token robota).
 
+### 4.4a. Quay nie wstaje: „Could not connect to Redis ... WRONGPASS" (skrypt 02b)
+
+Objaw — instalacja `mirror-registry` kończy się `Quay did not become alive`, a w logach
+`quay-app` (i w raporcie `HealthCheck` playbooka) widać:
+
+```
+| Redis | Could not connect to Redis with values provided in BUILDLOGS_REDIS.
+          Error: WRONGPASS invalid username-password pair or user is disabled.
+| Redis | Could not connect to Redis with values provided in USER_EVENTS_REDIS. ...
+```
+
+`quay-app.service` zostaje w pętli `activating (auto-restart)`.
+
+Hasła do Redis **nie pochodzą z naszych skryptów** — generuje je instalator mirror-registry.
+`WRONGPASS` znaczy dokładnie jedno: hasło zapisane w `<quayRoot>/quay-config/config.yaml`
+(`BUILDLOGS_REDIS` / `USER_EVENTS_REDIS`) jest inne niż to, z którym wystartował kontener
+`quay-redis`. Typowe przyczyny: instalator wygenerował dwa różne hasła (config i kontener),
+albo `config.yaml` został z poprzedniej instalacji, albo kontener Redis przetrwał reinstalację.
+
+```bash
+sudo bin/02b-fix-quay-redis.sh -f config/mirror-vars.yaml --plan   # sama diagnoza, nic nie zmienia
+sudo bin/02b-fix-quay-redis.sh -f config/mirror-vars.yaml          # diagnoza + naprawa
+```
+
+| Krok | Co się dzieje |
+|---|---|
+| konfiguracja | `config.yaml` z montowania `quay-app`, z unitu `quay-app.service` (działa też, gdy kontener jest w pętli restartów), z `registry.quayRoot` lub z typowych lokalizacji |
+| kandydaci | hasła z `config.yaml`, z kontenera `quay-redis` (`REDIS_PASSWORD`, `--requirepass`) i z `quay-redis.service` |
+| test | realne `AUTH` do Redis (`redis-cli PING`) dla każdego kandydata — w logu tylko skrót `sha256`, nie hasło |
+| naprawa A | działa hasło Redis inne niż w `config.yaml` → wpis do `config.yaml` (obie sekcje) + restart `quay-app` |
+| naprawa B | nie działa żadne (albo Redis bez hasła) → **nowe** hasło w `config.yaml` **i** w usłudze `quay-redis` (`--reset`), restart Redis i Quay |
+| weryfikacja | `quay-app` wstaje i utrzymuje się, w logach nie ma już `WRONGPASS` |
+
+Uwagi:
+
+- Dane w Redis (logi buildów, zdarzenia UI) są ulotne — restart niczego nie niszczy.
+  **Zmirrorowane obrazy w `quayStorage` nie są ruszane** — to naprawa zamiast reinstalacji.
+- Poprzedni `config.yaml` trafia do `config.yaml.bak-<data>`. Plik jest przepisywany
+  parserem YAML: wartości te same, komentarze i formatowanie mogą się zmienić.
+- `--show-secrets` wypisuje hasła jawnie (domyślnie tylko `sha256:` i długość).
+- Jeśli hasła nie ma ani w unicie, ani w pliku `--env-file`, zostaje czysta reinstalacja (4.4).
+
 ### 4.5. Mini Quay już zainstalowany? Inwentaryzacja (skrypt 00)
 
 Jeśli mini Quay działa już na bastionie (np. zainstalowany i uruchamiany przez `sudo podman`),

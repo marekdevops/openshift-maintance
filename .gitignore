@@ -10,3 +10,6 @@ venv/
 
 # ocmirror: raporty preflight zawierają dane klastra — nie commitujemy
 ocmirror/reports/
+
+# screeny błędów z telefonu — tylko lokalnie
+ocmirror/errors_jpg/
