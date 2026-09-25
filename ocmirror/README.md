@@ -49,7 +49,7 @@ ocmirror/
 ├── bin/
 │   ├── 00-inspect-quay.sh        # inwentaryzacja istniejącego mini Quay (też z sudo) -> sekcja registry: (tylko odczyt)
 │   ├── 01-preflight.sh           # analiza klastra + graf aktualizacji Red Hat + szkic zmiennych (tylko odczyt)
-│   ├── 02a-reinstall-quay.sh     # (sudo) czysta reinstalacja mini Quay: usuwa starą, nowe hasło init, CA, auth.json
+│   ├── 02a-reinstall-quay.sh     # (sudo) czysta reinstalacja mini Quay: usuwa starą, nowe hasło init, CA, auth.json (--finish: same kroki 6-9)
 │   ├── 02b-fix-quay-redis.sh     # (sudo) diagnoza i naprawa błędu Quay "WRONGPASS" / "Could not connect to Redis"
 │   ├── 02-setup-bastion.sh       # oc, oc-mirror, opm, mini Quay, CA, firewall, auth.json (idempotentny)
 │   ├── 03-generate-imageset.py   # mirror-vars.yaml -> ImageSetConfiguration (walidacja reguł oc-mirror)

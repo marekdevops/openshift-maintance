@@ -601,6 +601,11 @@ cat <<EOF
   Kopia poprzedniego config.yaml : $BACKUP_CFG
   Kontrola                       : bin/00-inspect-quay.sh ${VARS_FILE:+-f $VARS_FILE}
 
+  Jeśli Quay wstał dopiero teraz, a instalator 02a przerwał się na kroku 5, to kroki 6-9
+  (CA w zaufanych i certs.d, firewall, auth.json, weryfikacja logowania) NIE zostały wykonane.
+  Dokończ je bez ponownej instalacji:
+    sudo bin/02a-reinstall-quay.sh ${VARS_FILE:+-f $VARS_FILE} -p <pull-secret.txt> --finish
+
   Uwaga: config.yaml został przepisany przez parser YAML — wartości są te same,
   ale komentarze i formatowanie mogły się zmienić. Oryginał jest w kopii powyżej.
 EOF

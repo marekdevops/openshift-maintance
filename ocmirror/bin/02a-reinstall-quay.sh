@@ -15,6 +15,10 @@
 #   --temp-ssh-root    jeśli sshd blokuje root@localhost, dopuść go TYLKO z 127.0.0.1/::1 na czas
 #                      instalacji (plik w /etc/ssh/sshd_config.d/, usuwany automatycznie)
 #   --yes              nie pytaj o potwierdzenie usunięcia (automatyzacja)
+#   --finish           NIE instaluj niczego — dokończ kroki 6-9 (CA, firewall, auth.json,
+#                      weryfikacja) na już działającym Quay. Do użycia, gdy instalacja
+#                      przerwała się po kroku 5 i naprawiłeś ją osobno (np. 02b-fix-quay-redis.sh).
+#                      Hasło użytkownika init jest wtedy czytane z zapisanego pliku.
 #
 # Co robi:
 #   1. Sprawdza wymagania (root, DNS, sshd, pull secret, miejsce)
@@ -43,6 +47,7 @@ SSL_KEY=""
 SSL_CA=""
 TEMP_SSH_ROOT=0
 ASSUME_YES=0
+FINISH_ONLY=0
 
 usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
@@ -57,6 +62,7 @@ while [[ $# -gt 0 ]]; do
         --ssl-ca) SSL_CA="$2"; shift 2 ;;
         --temp-ssh-root) TEMP_SSH_ROOT=1; shift ;;
         --yes) ASSUME_YES=1; shift ;;
+        --finish) FINISH_ONLY=1; shift ;;
         -h|--help) usage 0 ;;
         *) echo "Nieznana opcja: $1"; usage 1 ;;
     esac
@@ -67,6 +73,7 @@ done
 if [[ -n "$SSL_CERT$SSL_KEY$SSL_CA" && ( -z "$SSL_CERT" || -z "$SSL_KEY" || -z "$SSL_CA" ) ]]; then
     die "Własny certyfikat wymaga wszystkich trzech opcji: --ssl-cert, --ssl-key, --ssl-ca"
 fi
+if (( FINISH_ONLY && PLAN_ONLY )); then die "--finish i --plan wykluczają się"; fi
 
 # Instalator mirror-registry używa $HOME/.ssh/quay_installer i łączy się jako $USER@localhost
 export HOME=/root USER=root
@@ -122,7 +129,7 @@ is_protected_path() {
     [[ "$(tr -cd '/' <<<"$p" | wc -c)" -lt 2 ]]    # wymagamy głębokości >= 2, np. /data/quay
 }
 
-log_header "REINSTALACJA MINI QUAY — ${REG_HOST}$( (( PLAN_ONLY )) && echo ' (PLAN)')"
+log_header "$( (( FINISH_ONLY )) && echo 'DOKOŃCZENIE KONFIGURACJI MINI QUAY' || echo 'REINSTALACJA MINI QUAY') — ${REG_HOST}$( (( PLAN_ONLY )) && echo ' (PLAN)')"
 echo "  Właściciel plików roboczych: $OWNER"
 
 # ---------------------------------------------------------------------------
@@ -144,8 +151,13 @@ for d in "$QUAY_ROOT" "$QUAY_STORAGE" "$SQLITE_STORAGE"; do
 done
 [[ "$REG_PORT" == "8443" ]] || log_info "Port rejestru: $REG_PORT (standardowo 8443)"
 
-systemctl is-active --quiet sshd || die "sshd nie działa — instalator mirror-registry łączy się przez SSH z localhost"
-log_ok "sshd działa"
+if (( FINISH_ONLY )); then
+    log_info "Tryb --finish: nie uruchamiam instalatora, więc sshd nie jest potrzebne"
+elif systemctl is-active --quiet sshd; then
+    log_ok "sshd działa"
+else
+    die "sshd nie działa — instalator mirror-registry łączy się przez SSH z localhost"
+fi
 
 if [[ -n "$PULL_SECRET" ]]; then
     [[ -r "$PULL_SECRET" ]] || die "Nie można odczytać $PULL_SECRET"
@@ -170,6 +182,11 @@ if [[ -n "$SSL_CERT" ]]; then
     openssl verify -CAfile "$SSL_CA" "$SSL_CERT" >/dev/null || die "$SSL_CERT nie weryfikuje się względem $SSL_CA"
     log_ok "Własny certyfikat: obejmuje $REG_FQDN, łańcuch do $SSL_CA poprawny"
 fi
+
+# Kroki 2-5 (wykrycie, kopia, usunięcie, instalacja) pomijamy w trybie --finish.
+# Blok zamyka "fi" tuż przed krokiem 6; zawartość celowo bez dodatkowego wcięcia,
+# żeby diff dotyczył samej zmiany, a nie przesunięcia 200 linii.
+if (( ! FINISH_ONLY )); then
 
 # ---------------------------------------------------------------------------
 # 2. Istniejąca instalacja
@@ -392,6 +409,8 @@ if ! (cd "$MR_DIR" && ./mirror-registry "${INSTALL_ARGS[@]}") 2>&1 \
        Hasło w quay-config/config.yaml jest inne niż to, z którym wystartował kontener quay-redis.
        Nie trzeba instalować od nowa — zdiagnozuj i napraw:
          sudo $(dirname "$(readlink -f "$0")")/02b-fix-quay-redis.sh -f $VARS_FILE --plan
+       Gdy Quay już wstanie, dokończ kroki 6-9 (CA, firewall, auth.json) BEZ ponownej instalacji:
+         sudo $0 -f $VARS_FILE -p $PULL_SECRET --finish
        Szczegóły instalacji: $INSTALL_LOG"
     fi
     die "Instalacja mirror-registry nie powiodła się — szczegóły w $INSTALL_LOG"
@@ -401,6 +420,24 @@ log_ok "mirror-registry zainstalowany"
 
 # Tymczasowy dostęp SSH nie jest już potrzebny
 if [[ -f "$SSHD_DROPIN" ]]; then rm -f "$SSHD_DROPIN"; systemctl reload sshd; log_ok "Cofnięto tymczasowe ustawienie sshd"; fi
+
+else   # --finish: Quay już działa, bierzemy tylko hasło init i lecimy dalej
+
+log_section "2-5. Pomijam wykrywanie, usuwanie i instalację (--finish)"
+podman container exists quay-app 2>/dev/null \
+    || die "Nie ma kontenera quay-app — nie ma czego dokańczać. Zainstaluj: $0 -f $VARS_FILE -p <pull-secret>"
+[[ -d "$QUAY_ROOT/quay-config" ]] || die "Brak $QUAY_ROOT/quay-config — czy registry.quayRoot w $VARS_FILE jest poprawny?"
+[[ -r "$PASS_FILE" ]] || die "Brak zapisanego hasła użytkownika init: $PASS_FILE
+       To hasło ustawia instalator; bez niego nie zbuduję auth.json. Opcje:
+         - podaj je ręcznie:  echo '<hasło>' | sudo tee $PASS_FILE >/dev/null && sudo chmod 600 $PASS_FILE
+         - albo zainstaluj Quay od nowa (bez --finish)"
+PASSWORD=$(tr -d '\r\n' <"$PASS_FILE")
+[[ -n "$PASSWORD" ]] || die "$PASS_FILE jest pusty"
+log_ok "Hasło użytkownika init wczytane z $PASS_FILE"
+install -d -m 0755 -o "$OWNER" -g "$OWNER_GROUP" "$BASE_DIR" "$LOG_DIR"
+install -d -m 0700 -o "$OWNER" -g "$OWNER_GROUP" "$AUTH_DIR"
+
+fi
 
 # ---------------------------------------------------------------------------
 # 6. CA rejestru

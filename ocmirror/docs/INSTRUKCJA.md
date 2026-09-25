@@ -167,6 +167,35 @@ Uwagi:
 - Po reinstalacji: nowa organizacja i robot (rozdz. 4.7), a jeśli klaster był już skonfigurowany —
   `05-configure-cluster.sh --stage trust,pullsecret` (nowe CA i nowy token robota).
 
+### 4.4b. Instalacja przerwała się po kroku 5? Dokończ konfigurację (`--finish`)
+
+`02a-reinstall-quay.sh` kończy pracę na `die`, gdy instalator `mirror-registry` zwróci błąd
+(np. Redis — rozdz. 4.4a). Quay może wtedy już działać, ale **kroki 6-9 nigdy się nie wykonały**:
+
+| Nie wykonane | Skutek |
+|---|---|
+| 6. CA rejestru | brak CA w zaufanych systemu i w `/etc/containers/certs.d/<host:port>/ca.crt`, brak `quay-rootCA.pem` dla `registry.caFile` |
+| 7. firewall | port rejestru zamknięty dla węzłów klastra |
+| 8. `auth.json` | **brak poświadczeń `init@<host:port>`** — stąd `podman/skopeo login` kończy się `401 Unauthorized` |
+| 9. weryfikacja | brak potwierdzenia, że logowanie do Quay i do Red Hata działa |
+
+Po naprawieniu przyczyny (Quay wstał, `sudo podman ps` pokazuje `quay-app`, `quay-redis`)
+dokończ konfigurację **bez ponownej instalacji i bez kasowania obrazów**:
+
+```bash
+sudo bin/02a-reinstall-quay.sh -f config/mirror-vars.yaml -p ~/pull-secret.txt --finish
+```
+
+Tryb `--finish`:
+
+- pomija kroki 2-5 (wykrycie, kopię, usunięcie, instalację) — niczego nie kasuje,
+- nie wymaga `sshd` (instalator się nie uruchamia),
+- czyta hasło użytkownika `init` z zapisanego pliku `<katalog authFile>/quay-init-password`
+  (skrypt zapisuje je *przed* instalacją, więc przetrwało przerwanie),
+- wykonuje kroki 6-9 dokładnie tak jak przy pełnej instalacji.
+
+Jeśli pliku z hasłem nie ma, skrypt powie, jak je wpisać ręcznie — albo zostaje instalacja od zera.
+
 ### 4.4a. Quay nie wstaje: „Could not connect to Redis ... WRONGPASS" (skrypt 02b)
 
 Objaw — instalacja `mirror-registry` kończy się `Quay did not become alive`, a w logach
